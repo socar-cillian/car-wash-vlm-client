@@ -1,0 +1,42 @@
+# Ruff configuration file
+# https://docs.astral.sh/ruff/
+
+# Line length
+line-length = 120
+
+[lint]
+# Enable linting rules
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort (import sorting)
+    "N",     # pep8-naming
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "C4",    # flake8-comprehensions
+    "SIM",   # flake8-simplify
+]
+
+# Ignore specific rules if needed
+ignore = []
+
+# Allow autofix for all enabled rules
+fixable = ["ALL"]
+unfixable = []
+
+[lint.isort]
+# Configure import sorting
+known-first-party = []
+force-single-line = false
+lines-after-imports = 2
+
+[format]
+# Use double quotes for strings
+quote-style = "double"
+
+# Indent with spaces
+indent-style = "space"
+
+# Line endings
+line-ending = "auto"
