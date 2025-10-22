@@ -36,13 +36,13 @@ python main.py infer \
 python main.py infer \
   images/sample_images/images/car1.jpg \
   prompts/car_contamination_classification_prompt_v5.txt \
-  --model qwen3-vl-4b-instruct \
+  --model qwen3-vl-8b-instruct-fp8 \
   --temperature 0.0
 ```
 
 **Options:**
 - `--api-url`: VLM API endpoint URL (default: http://vllm.mlops.socarcorp.co.kr/v1/chat/completions)
-- `--model`: Model name (default: qwen3-vl-4b-instruct)
+- `--model`: Model name (default: qwen3-vl-8b-instruct-fp8)
 - `--max-tokens`: Maximum tokens to generate (default: 1000)
 - `--temperature`: Sampling temperature (default: 0.0)
 - `--output`: Output file path (optional)
@@ -72,12 +72,19 @@ python main.py batch-infer \
   results/inference_results.csv \
   --limit 10
 
+# With ground truth CSV for evaluation
+python main.py batch-infer \
+  images/sample_images/images \
+  prompts/car_contamination_classification_prompt_v5.txt \
+  results/inference_results.csv \
+  --gt-csv images/sample_images/csv/merged_data.csv
+
 # With custom parameters
 python main.py batch-infer \
   images/sample_images/images \
   prompts/car_contamination_classification_prompt_v5.txt \
   results/inference_results.csv \
-  --model qwen3-vl-4b-instruct \
+  --model qwen3-vl-8b-instruct-fp8 \
   --max-tokens 1000 \
   --temperature 0.0
 ```
@@ -85,6 +92,8 @@ python main.py batch-infer \
 **Output CSV Format:**
 The CSV includes:
 - `image_name`: Image filename
+- `gt_contamination_area`: Ground truth area (interior/exterior) - if GT CSV provided
+- `gt_contamination_type`: Ground truth contamination type - if GT CSV provided
 - `model`: Model used for inference
 - `latency_seconds`: Processing time
 - `success`: Whether inference succeeded
@@ -94,10 +103,11 @@ The CSV includes:
 
 **Options:**
 - `--api-url`: VLM API endpoint URL
-- `--model`: Model name (default: qwen3-vl-4b-instruct)
+- `--model`: Model name (default: qwen3-vl-8b-instruct-fp8)
 - `--max-tokens`: Maximum tokens to generate (default: 1000)
 - `--temperature`: Sampling temperature (default: 0.0)
 - `--limit`: Maximum number of images to process (default: all)
+- `--gt-csv`: Path to ground truth CSV file for evaluation (optional)
 
 ---
 

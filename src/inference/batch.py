@@ -154,6 +154,29 @@ def create_csv_row(image_path: Path, inference_result: dict, model_name: str) ->
     return row
 
 
+def load_ground_truth(gt_csv_path: Path) -> dict[str, dict]:
+    """
+    Load ground truth data from CSV file.
+
+    Args:
+        gt_csv_path: Path to ground truth CSV file
+
+    Returns:
+        Dictionary mapping filename to GT data
+    """
+    gt_data = {}
+    with open(gt_csv_path, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            file_name = row.get("file_name", "")
+            if file_name:
+                gt_data[file_name] = {
+                    "gt_contamination_area": row.get("gt_contamination_area", ""),
+                    "gt_contamination_type": row.get("gt_contamination_type", ""),
+                }
+    return gt_data
+
+
 def run_batch_inference(
     images_dir: Path,
     prompt_path: Path,
@@ -163,6 +186,7 @@ def run_batch_inference(
     max_tokens: int,
     temperature: float,
     limit: Optional[int] = None,
+    gt_csv_path: Optional[Path] = None,
 ) -> dict:
     """
     Run batch inference on all images in directory.
@@ -176,6 +200,7 @@ def run_batch_inference(
         max_tokens: Maximum tokens to generate
         temperature: Sampling temperature
         limit: Maximum number of images to process (default: all)
+        gt_csv_path: Optional path to ground truth CSV file
 
     Returns:
         Dictionary with summary statistics
@@ -192,6 +217,13 @@ def run_batch_inference(
 
     if not image_files:
         raise ValueError(f"No images found in {images_dir}")
+
+    # Load ground truth data if provided
+    gt_data = {}
+    if gt_csv_path is not None and gt_csv_path.exists():
+        print(f"Loading ground truth data from {gt_csv_path}")
+        gt_data = load_ground_truth(gt_csv_path)
+        print(f"Loaded GT data for {len(gt_data)} images")
 
     # Apply limit if specified
     if limit is not None and limit > 0:
@@ -212,6 +244,15 @@ def run_batch_inference(
         )
 
         row = create_csv_row(image_path, inference_result, model)
+
+        # Add ground truth columns if available
+        if image_path.name in gt_data:
+            row["gt_contamination_area"] = gt_data[image_path.name]["gt_contamination_area"]
+            row["gt_contamination_type"] = gt_data[image_path.name]["gt_contamination_type"]
+        else:
+            row["gt_contamination_area"] = ""
+            row["gt_contamination_type"] = ""
+
         results.append(row)
 
         if inference_result["success"]:
@@ -220,7 +261,16 @@ def run_batch_inference(
             print(f"  ✗ Failed: {inference_result.get('error', 'unknown')}")
 
     # Save results
-    fieldnames = ["image_name", "model", "latency_seconds", "success", "error", "image_type"]
+    fieldnames = [
+        "image_name",
+        "gt_contamination_area",
+        "gt_contamination_type",
+        "model",
+        "latency_seconds",
+        "success",
+        "error",
+        "image_type",
+    ]
     for area in ALL_AREAS:
         fieldnames.append(f"{area}_contamination_type")
         fieldnames.append(f"{area}_severity")

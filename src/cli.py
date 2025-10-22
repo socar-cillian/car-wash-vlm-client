@@ -25,7 +25,7 @@ def single_inference(
         str,
         typer.Option(help="VLM API endpoint URL"),
     ] = "http://vllm.mlops.socarcorp.co.kr/v1/chat/completions",
-    model: Annotated[str, typer.Option(help="Model name")] = "qwen3-vl-4b-instruct",
+    model: Annotated[str, typer.Option(help="Model name")] = "qwen3-vl-8b-instruct-fp8",
     max_tokens: Annotated[int, typer.Option(help="Maximum tokens to generate")] = 1000,
     temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
     output: Annotated[Optional[Path], typer.Option(help="Output file path (optional)")] = None,
@@ -102,10 +102,11 @@ def batch_inference(
         str,
         typer.Option(help="VLM API endpoint URL"),
     ] = "http://vllm.mlops.socarcorp.co.kr/v1/chat/completions",
-    model: Annotated[str, typer.Option(help="Model name")] = "qwen3-vl-4b-instruct",
+    model: Annotated[str, typer.Option(help="Model name")] = "qwen3-vl-8b-instruct-fp8",
     max_tokens: Annotated[int, typer.Option(help="Maximum tokens to generate")] = 1000,
     temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
     limit: Annotated[Optional[int], typer.Option(help="Maximum number of images to process (default: all)")] = None,
+    gt_csv: Annotated[Optional[Path], typer.Option("--gt-csv", help="Path to ground truth CSV file (optional)")] = None,
 ):
     """Run batch inference on multiple images."""
     typer.echo("=" * 60)
@@ -138,6 +139,7 @@ def batch_inference(
             max_tokens=max_tokens,
             temperature=temperature,
             limit=limit,
+            gt_csv_path=gt_csv,
         )
 
         typer.echo("\n" + "=" * 60)
