@@ -25,6 +25,20 @@ EXTERIOR_AREAS_DISPLAY = {
     "rear": "후면 (Rear)",
 }
 
+# Korean-only area name mappings (for v3 template)
+INTERIOR_AREAS_KR = {
+    "driver_seat": "운전석",
+    "passenger_seat": "조수석",
+    "cup_holder": "컵홀더",
+    "back_seat": "뒷좌석",
+}
+EXTERIOR_AREAS_KR = {
+    "front": "전면",
+    "passenger_side": "조수석_방향",
+    "driver_side": "운전석_방향",
+    "rear": "후면",
+}
+
 # Severity level labels
 SEVERITY_LABELS = {
     "양호": "Good",
@@ -139,10 +153,27 @@ def generate_prompt_template(
     interior_area_display = [INTERIOR_AREAS_DISPLAY[area] for area in INTERIOR_AREAS]
     exterior_area_display = [EXTERIOR_AREAS_DISPLAY[area] for area in EXTERIOR_AREAS]
 
-    # Generate contamination type enum values
+    # Korean-only area names (for v3 template)
+    interior_areas_kr = [INTERIOR_AREAS_KR[area] for area in INTERIOR_AREAS]
+    exterior_areas_kr = [EXTERIOR_AREAS_KR[area] for area in EXTERIOR_AREAS]
+    all_areas_kr = interior_areas_kr + exterior_areas_kr
+
+    # Generate contamination type enum values (for v1/v2 templates)
     interior_enum_values = [f'"{_sanitize_enum_value(ct)}"' for ct in interior_items]
     exterior_enum_values = [f'"{_sanitize_enum_value(ct)}"' for ct in exterior_items]
     all_enum_values = interior_enum_values + exterior_enum_values
+
+    # Extract contamination type lists (for v3 template)
+    interior_contamination_types = list(interior_items.keys())
+    exterior_contamination_types = list(exterior_items.keys())
+
+    # Extract severity levels from the data
+    severity_levels = set()
+    for row in transformed_rows:
+        severity_levels.add(row["오염 기준"])
+    severity_levels_list = sorted(
+        severity_levels, key=lambda x: ["양호", "보통", "심각"].index(x) if x in ["양호", "보통", "심각"] else 999
+    )
 
     template_data = {
         "interior_areas": interior_area_display,
@@ -154,6 +185,13 @@ def generate_prompt_template(
         "exterior_items": exterior_items,
         "severity_labels": SEVERITY_LABELS,
         "contamination_types": all_enum_values,
+        # For v3 template (Korean only)
+        "interior_areas_kr": interior_areas_kr,
+        "exterior_areas_kr": exterior_areas_kr,
+        "all_areas_kr": all_areas_kr,
+        "interior_contamination_types": interior_contamination_types,
+        "exterior_contamination_types": exterior_contamination_types,
+        "severity_levels": severity_levels_list,
     }
 
     # Load and render template
@@ -163,7 +201,8 @@ def generate_prompt_template(
         template = env.get_template(template_path.name)
     else:
         # Use default versioned template
-        template_dir = Path(__file__).parent.parent / "prompts" / "templates"
+        # Path from src/prompts/generator.py to prompts/templates/
+        template_dir = Path(__file__).parent.parent.parent / "prompts" / "templates"
         template_filename = f"contamination_classification_v{template_version}.j2"
 
         if template_dir.exists() and (template_dir / template_filename).exists():
@@ -171,6 +210,7 @@ def generate_prompt_template(
             template = env.get_template(template_filename)
         else:
             # Fallback to inline template
+            print(f"Warning: Template not found at {template_dir / template_filename}, using fallback")
             template = Template(_get_default_template())
 
     return template.render(**template_data)

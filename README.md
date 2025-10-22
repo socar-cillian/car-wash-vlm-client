@@ -42,7 +42,7 @@ python main.py infer \
 
 **Options:**
 - `--api-url`: VLM API endpoint URL (default: http://vllm.mlops.socarcorp.co.kr/v1/chat/completions)
-- `--model`: Model name (default: qwen3-vl-8b-instruct-fp8)
+- `--model`: Model name (default: qwen25-vl-7b-instruct-awq)
 - `--max-tokens`: Maximum tokens to generate (default: 1000)
 - `--temperature`: Sampling temperature (default: 0.0)
 - `--output`: Output file path (optional)
@@ -51,36 +51,38 @@ python main.py infer \
 
 ### 2. Batch Inference (`batch-infer`)
 
-Run inference on multiple images and save results to CSV.
+Run inference on multiple images specified in a CSV file and save results to CSV.
 
 ```bash
-python main.py batch-infer <images_directory> <prompt_path> <output_csv> [OPTIONS]
+python main.py batch-infer <input_csv> <images_directory> <prompt_path> <output_csv> [OPTIONS]
 ```
+
+**Input CSV Format:**
+The input CSV must contain the following columns:
+- `file_name`: Image filename (e.g., "car1.jpg")
+- `gt_contamination_area`: Ground truth area (interior/exterior)
+- `gt_contamination_type`: Ground truth contamination type
 
 **Example:**
 ```bash
-# Process all images in a directory
+# Process images specified in CSV with ground truth data
 python main.py batch-infer \
+  images/sample_images/csv/merged_data.csv \
   images/sample_images/images \
   prompts/car_contamination_classification_prompt_v5.txt \
   results/inference_results.csv
 
 # Process only first 10 images
 python main.py batch-infer \
+  images/sample_images/csv/merged_data.csv \
   images/sample_images/images \
   prompts/car_contamination_classification_prompt_v5.txt \
   results/inference_results.csv \
   --limit 10
 
-# With ground truth CSV for evaluation
+# With custom model (default is qwen25-vl-7b-instruct-awq)
 python main.py batch-infer \
-  images/sample_images/images \
-  prompts/car_contamination_classification_prompt_v5.txt \
-  results/inference_results.csv \
-  --gt-csv images/sample_images/csv/merged_data.csv
-
-# With custom parameters
-python main.py batch-infer \
+  images/sample_images/csv/merged_data.csv \
   images/sample_images/images \
   prompts/car_contamination_classification_prompt_v5.txt \
   results/inference_results.csv \
@@ -92,8 +94,8 @@ python main.py batch-infer \
 **Output CSV Format:**
 The CSV includes:
 - `image_name`: Image filename
-- `gt_contamination_area`: Ground truth area (interior/exterior) - if GT CSV provided
-- `gt_contamination_type`: Ground truth contamination type - if GT CSV provided
+- `gt_contamination_area`: Ground truth area (interior/exterior) from input CSV
+- `gt_contamination_type`: Ground truth contamination type from input CSV
 - `model`: Model used for inference
 - `latency_seconds`: Processing time
 - `success`: Whether inference succeeded
@@ -103,11 +105,10 @@ The CSV includes:
 
 **Options:**
 - `--api-url`: VLM API endpoint URL
-- `--model`: Model name (default: qwen3-vl-8b-instruct-fp8)
+- `--model`: Model name (default: qwen25-vl-7b-instruct-awq)
 - `--max-tokens`: Maximum tokens to generate (default: 1000)
 - `--temperature`: Sampling temperature (default: 0.0)
 - `--limit`: Maximum number of images to process (default: all)
-- `--gt-csv`: Path to ground truth CSV file for evaluation (optional)
 
 ---
 
@@ -134,11 +135,16 @@ python main.py generate-prompt \
   guideline/guideline_v1.csv \
   --save-transformed
 
-# Use specific template version
+# Use template version 3 (Korean prompt with English keys)
 python main.py generate-prompt \
   guideline/guideline_v1.csv \
-  --template-version 1
+  --template-version 3
 ```
+
+**Template Versions:**
+- **v1**: English instructions with Korean examples
+- **v2**: English instructions with strict English output codes
+- **v3**: Korean instructions with Korean values (auto-converted to English in CSV output)
 
 **Options:**
 - `--save-transformed`: Save transformed guideline CSV

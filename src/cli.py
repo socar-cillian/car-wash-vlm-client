@@ -25,7 +25,7 @@ def single_inference(
         str,
         typer.Option(help="VLM API endpoint URL"),
     ] = "http://vllm.mlops.socarcorp.co.kr/v1/chat/completions",
-    model: Annotated[str, typer.Option(help="Model name")] = "qwen3-vl-8b-instruct-fp8",
+    model: Annotated[str, typer.Option(help="Model name")] = "qwen25-vl-7b-instruct-awq",
     max_tokens: Annotated[int, typer.Option(help="Maximum tokens to generate")] = 1000,
     temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
     output: Annotated[Optional[Path], typer.Option(help="Output file path (optional)")] = None,
@@ -95,6 +95,7 @@ def single_inference(
 
 @app.command("batch-infer")
 def batch_inference(
+    input_csv: Annotated[Path, typer.Argument(help="Input CSV file with file_name and GT columns")],
     images_dir: Annotated[Path, typer.Argument(help="Directory containing images")],
     prompt: Annotated[Path, typer.Argument(help="Path to prompt file")],
     output: Annotated[Path, typer.Argument(help="Output CSV file path")],
@@ -102,18 +103,21 @@ def batch_inference(
         str,
         typer.Option(help="VLM API endpoint URL"),
     ] = "http://vllm.mlops.socarcorp.co.kr/v1/chat/completions",
-    model: Annotated[str, typer.Option(help="Model name")] = "qwen3-vl-8b-instruct-fp8",
+    model: Annotated[str, typer.Option(help="Model name")] = "qwen25-vl-7b-instruct-awq",
     max_tokens: Annotated[int, typer.Option(help="Maximum tokens to generate")] = 1000,
     temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
     limit: Annotated[Optional[int], typer.Option(help="Maximum number of images to process (default: all)")] = None,
-    gt_csv: Annotated[Optional[Path], typer.Option("--gt-csv", help="Path to ground truth CSV file (optional)")] = None,
 ):
-    """Run batch inference on multiple images."""
+    """Run batch inference on multiple images specified in CSV file."""
     typer.echo("=" * 60)
     typer.echo("Batch Inference")
     typer.echo("=" * 60)
 
     # Validate paths
+    if not input_csv.exists():
+        typer.echo(f"Error: Input CSV file not found: {input_csv}", err=True)
+        raise typer.Exit(1)
+
     if not images_dir.exists():
         typer.echo(f"Error: Images directory not found: {images_dir}", err=True)
         raise typer.Exit(1)
@@ -122,6 +126,7 @@ def batch_inference(
         typer.echo(f"Error: Prompt file not found: {prompt}", err=True)
         raise typer.Exit(1)
 
+    typer.echo(f"Input CSV: {input_csv}")
     typer.echo(f"Images directory: {images_dir}")
     typer.echo(f"Prompt file: {prompt}")
     typer.echo(f"Output CSV: {output}")
@@ -131,6 +136,7 @@ def batch_inference(
 
     try:
         summary = run_batch_inference(
+            input_csv=input_csv,
             images_dir=images_dir,
             prompt_path=prompt,
             output_csv=output,
@@ -139,7 +145,6 @@ def batch_inference(
             max_tokens=max_tokens,
             temperature=temperature,
             limit=limit,
-            gt_csv_path=gt_csv,
         )
 
         typer.echo("\n" + "=" * 60)
