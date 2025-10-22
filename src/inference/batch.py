@@ -4,8 +4,9 @@ import csv
 import json
 import time
 from pathlib import Path
+from typing import Optional
 
-from src.client import VLMClient
+from src.api import VLMClient
 
 
 # Fixed vehicle areas
@@ -161,7 +162,7 @@ def run_batch_inference(
     model: str,
     max_tokens: int,
     temperature: float,
-    limit: int | None = None,
+    limit: Optional[int] = None,
 ) -> dict:
     """
     Run batch inference on all images in directory.

@@ -1,7 +1,9 @@
 """Car Wash VLM Client package."""
 
-from .client import VLMClient
-from .exceptions import ImageNotFoundError, InvalidImageFormatError, PromptNotFoundError, VLMClientError
+from src.api import VLMClient
+from src.api.exceptions import ImageNotFoundError, InvalidImageFormatError, PromptNotFoundError, VLMClientError
+from src.inference import run_batch_inference
+from src.prompts import generate_prompt_template, save_transformed_guideline, transform_guideline_csv
 
 
 __all__ = [
@@ -10,4 +12,8 @@ __all__ = [
     "ImageNotFoundError",
     "PromptNotFoundError",
     "InvalidImageFormatError",
+    "run_batch_inference",
+    "generate_prompt_template",
+    "save_transformed_guideline",
+    "transform_guideline_csv",
 ]

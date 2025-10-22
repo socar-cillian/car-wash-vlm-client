@@ -1,13 +1,13 @@
 """Integrated CLI for car contamination classification."""
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Optional
 
 import typer
 
-from src.batch_inference import run_batch_inference
-from src.client import VLMClient
-from src.prompt_generator import generate_prompt_template, save_transformed_guideline, transform_guideline_csv
+from src.api import VLMClient
+from src.inference import run_batch_inference
+from src.prompts import generate_prompt_template, save_transformed_guideline, transform_guideline_csv
 
 
 app = typer.Typer(
@@ -28,7 +28,7 @@ def single_inference(
     model: Annotated[str, typer.Option(help="Model name")] = "qwen3-vl-4b-instruct",
     max_tokens: Annotated[int, typer.Option(help="Maximum tokens to generate")] = 1000,
     temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
-    output: Annotated[Path | None, typer.Option(help="Output file path (optional)")] = None,
+    output: Annotated[Optional[Path], typer.Option(help="Output file path (optional)")] = None,
 ):
     """Run inference on a single image."""
     typer.echo("=" * 60)
@@ -105,7 +105,7 @@ def batch_inference(
     model: Annotated[str, typer.Option(help="Model name")] = "qwen3-vl-4b-instruct",
     max_tokens: Annotated[int, typer.Option(help="Maximum tokens to generate")] = 1000,
     temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
-    limit: Annotated[int | None, typer.Option(help="Maximum number of images to process (default: all)")] = None,
+    limit: Annotated[Optional[int], typer.Option(help="Maximum number of images to process (default: all)")] = None,
 ):
     """Run batch inference on multiple images."""
     typer.echo("=" * 60)
@@ -164,7 +164,7 @@ def batch_inference(
 @app.command("generate-prompt")
 def generate_prompt(
     guideline: Annotated[Path, typer.Argument(help="Path to guideline CSV file")],
-    output: Annotated[Path | None, typer.Argument(help="Output prompt file path (optional)")] = None,
+    output: Annotated[Optional[Path], typer.Argument(help="Output prompt file path (optional)")] = None,
     save_transformed: Annotated[
         bool, typer.Option("--save-transformed", help="Save transformed guideline CSV")
     ] = False,
