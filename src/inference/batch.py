@@ -263,9 +263,6 @@ def create_csv_row(image_path: Path, inference_result: dict, model_name: str) ->
     # Add image type
     row["image_type"] = result.get("image_type", "")
 
-    # Add overall assessment (v3 template feature)
-    row["overall_assessment"] = result.get("overall_assessment", "")
-
     # Create a lookup dict for areas
     # In v3 template, areas array only contains contaminated areas
     areas_dict = {}
@@ -434,7 +431,6 @@ def run_batch_inference(
         "success",
         "error",
         "image_type",
-        "overall_assessment",
     ]
     for area in ALL_AREAS:
         fieldnames.append(f"{area}_contamination_type")

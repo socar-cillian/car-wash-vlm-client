@@ -63,7 +63,6 @@
 ```json
 {
   "image_type": "내부" | "외부" | "관련없음",
-  "overall_assessment": "차량 전체 상태를 한 줄로 요약",
   "areas": [
     {
       "area_name": {% if all_areas_kr %}"{{ all_areas_kr|join('" | "') }}"{% else %}"운전석" | "조수석" | "컵홀더" | "뒷좌석" | "전면" | "조수석_방향" | "운전석_방향" | "후면"{% endif %},
@@ -104,7 +103,6 @@
 
 4. **중요 규칙 (출력 토큰 최적화)**:
    - **오염이 감지된 영역만 areas 배열에 포함** - 깨끗한 영역은 생략
-   - overall_assessment에 전체 차량 상태를 한 줄로 요약 (예: "전반적으로 깨끗함", "운전석과 컵홀더에 오염 있음")
    - 영역이 이미지에서 보이지 않으면 areas에 포함하지 않음
    - 한글 오염 유형 코드만 사용 - 절대 다른 표현 사용 금지
    - 유효한 JSON만 출력 - 추가 텍스트나 설명 없음
@@ -116,7 +114,6 @@
 ```json
 {
   "image_type": "내부",
-  "overall_assessment": "운전석과 컵홀더에 오염이 있으며, 조수석과 뒷좌석은 깨끗함",
   "areas": [
     {
       "area_name": "운전석",
@@ -136,7 +133,6 @@
 ```json
 {
   "image_type": "외부",
-  "overall_assessment": "전면에 벌레 사체가 있고 조수석 쪽에 물때 오염이 있음",
   "areas": [
     {
       "area_name": "전면",
@@ -156,7 +152,6 @@
 ```json
 {
   "image_type": "내부",
-  "overall_assessment": "전반적으로 깨끗하며 오염이 없음",
   "areas": []
 }
 ```
