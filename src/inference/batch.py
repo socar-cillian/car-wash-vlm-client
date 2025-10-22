@@ -9,9 +9,9 @@ from typing import Optional
 from src.api import VLMClient
 
 
-# Fixed vehicle areas
-INTERIOR_AREAS = ["driver_seat", "passenger_seat", "cup_holder", "back_seat"]
-EXTERIOR_AREAS = ["front", "passenger_side", "driver_side", "rear"]
+# Fixed vehicle areas (Korean)
+INTERIOR_AREAS = ["운전석", "조수석", "컵홀더", "뒷좌석"]
+EXTERIOR_AREAS = ["전면", "조수석_방향", "운전석_방향", "후면"]
 ALL_AREAS = INTERIOR_AREAS + EXTERIOR_AREAS
 
 
@@ -280,8 +280,8 @@ def create_csv_row(image_path: Path, inference_result: dict, model_name: str) ->
         else:
             # Area not in results means it's clean (for v3 template)
             # For legacy templates, empty string is appropriate
-            contamination_type = "clean" if result.get("areas", None) is not None else ""
-            severity = "clean" if result.get("areas", None) is not None else ""
+            contamination_type = "청결" if result.get("areas", None) is not None else ""
+            severity = "청결" if result.get("areas", None) is not None else ""
 
         row[f"{area}_contamination_type"] = contamination_type
         row[f"{area}_severity"] = severity

@@ -11,7 +11,36 @@ uv sync
 
 ## Commands
 
-### 1. Single Image Inference (`infer`)
+### 1. Dashboard (`dashboard`)
+
+Launch an interactive web dashboard to visualize inference results.
+
+```bash
+streamlit run src/dashboard/app.py
+```
+
+The dashboard provides:
+- 📊 Summary statistics (total images, success rate, interior/exterior counts)
+- 🔍 Filtering by image type, GT area, and inference success
+- 🖼️ Image-by-image navigation with side-by-side comparison
+- 📋 Ground truth vs prediction visualization
+- 🎨 Color-coded severity levels (🔴 심각, 🟡 보통, 🟢 양호)
+- 💾 Download filtered results as CSV
+
+**Configuration:**
+- Default CSV path: `results/inference_results.csv`
+- Default images directory: `images/sample_images/images`
+- Both paths can be customized in the sidebar
+
+**Usage Tips:**
+- Use the slider to navigate through images
+- Apply filters to focus on specific subsets
+- Hover over areas to see detailed contamination info
+- Download filtered results for further analysis
+
+---
+
+### 2. Single Image Inference (`infer`)
 
 Run inference on a single image to classify contamination.
 
@@ -49,7 +78,7 @@ python main.py infer \
 
 ---
 
-### 2. Batch Inference (`batch-infer`)
+### 3. Batch Inference (`batch-infer`)
 
 Run inference on multiple images specified in a CSV file and save results to CSV.
 
@@ -112,7 +141,7 @@ The CSV includes:
 
 ---
 
-### 3. Generate Prompt (`generate-prompt`)
+### 4. Generate Prompt (`generate-prompt`)
 
 Generate a prompt template from a guideline CSV file using Jinja2 templates.
 
