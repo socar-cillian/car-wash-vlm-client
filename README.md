@@ -1,115 +1,165 @@
-# Car Wash VLM Client
+# Car Contamination Classification
 
-Python client for querying Vision Language Models (VLM) via API. This tool allows you to send images (from URLs or local files) along with text prompts to analyze visual content.
-
-## Features
-
-- Support for both image URLs and local image files
-- Load prompts from text files or pass them directly
-- Base64 encoding for local images
-- Configurable model parameters (max tokens, temperature)
-- Save responses to file or print to stdout
+Python client for car contamination classification using Vision Language Models (VLM).
 
 ## Installation
 
 ```bash
-# Install dependencies
-pip install -e .
+# Install dependencies using uv
+uv sync
 ```
 
-## Usage
+## Commands
 
-### Basic Usage
+### 1. Single Image Inference (`infer`)
+
+Run inference on a single image to classify contamination.
 
 ```bash
-# Using image URL and direct prompt
-python main.py "https://example.com/image.jpg" "What do you see in this image?"
-
-# Using local image and prompt file
-python main.py "./images/car.jpg" "./prompts/example_korean.txt"
+python main.py infer <image_path> <prompt_path> [OPTIONS]
 ```
 
-### With Options
+**Example:**
+```bash
+# Basic usage
+python main.py infer \
+  images/sample_images/images/car1.jpg \
+  prompts/car_contamination_classification_prompt_v5.txt
+
+# Save output to file
+python main.py infer \
+  images/sample_images/images/car1.jpg \
+  prompts/car_contamination_classification_prompt_v5.txt \
+  --output results/car1_result.json
+
+# Use different model
+python main.py infer \
+  images/sample_images/images/car1.jpg \
+  prompts/car_contamination_classification_prompt_v5.txt \
+  --model qwen3-vl-4b-instruct \
+  --temperature 0.0
+```
+
+**Options:**
+- `--api-url`: VLM API endpoint URL (default: http://vllm.mlops.socarcorp.co.kr/v1/chat/completions)
+- `--model`: Model name (default: qwen3-vl-4b-instruct)
+- `--max-tokens`: Maximum tokens to generate (default: 1000)
+- `--temperature`: Sampling temperature (default: 0.0)
+- `--output`: Output file path (optional)
+
+---
+
+### 2. Batch Inference (`batch-infer`)
+
+Run inference on multiple images and save results to CSV.
 
 ```bash
-# Specify model and parameters
-python main.py \
-  "./images/car.jpg" \
-  "./prompts/car_wash_inspection.txt" \
-  --model "qwen3-vl-4b-instruct" \
-  --max-tokens 500 \
-  --temperature 0.7
-
-# Save response to file
-python main.py \
-  "https://example.com/image.jpg" \
-  "Describe this image" \
-  --output response.txt
-
-# Use different API endpoint
-python main.py \
-  "./image.jpg" \
-  "What do you see?" \
-  --api-url "http://localhost:8000/v1/chat/completions"
+python main.py batch-infer <images_directory> <prompt_path> <output_csv> [OPTIONS]
 ```
 
-### Command Line Arguments
+**Example:**
+```bash
+# Process all images in a directory
+python main.py batch-infer \
+  images/sample_images/images \
+  prompts/car_contamination_classification_prompt_v5.txt \
+  results/inference_results.csv
 
-```
-positional arguments:
-  image                 Image URL or local path to image file
-  prompt                Text prompt or path to .txt file containing prompt
+# Process only first 10 images
+python main.py batch-infer \
+  images/sample_images/images \
+  prompts/car_contamination_classification_prompt_v5.txt \
+  results/inference_results.csv \
+  --limit 10
 
-optional arguments:
-  --api-url            VLM API endpoint URL (default: http://vllm.mlops.socarcorp.co.kr/v1/chat/completions)
-  --model              Model name to use (default: qwen3-vl-4b-instruct)
-  --max-tokens         Maximum tokens to generate (default: 200)
-  --temperature        Sampling temperature (default: 0.7)
-  --output             Output file path (optional, prints to stdout if not specified)
-```
-
-## Example Prompts
-
-The `prompts/` directory contains example prompt files:
-
-- `example_korean.txt` - Simple Korean prompt
-- `example_english.txt` - Simple English prompt
-- `car_wash_inspection.txt` - Detailed car inspection prompt
-
-## Using as a Library
-
-```python
-from main import VLMClient
-
-# Initialize client
-client = VLMClient(
-    api_url="http://vllm.mlops.socarcorp.co.kr/v1/chat/completions",
-    model="qwen3-vl-4b-instruct"
-)
-
-# Query with image URL
-response = client.query(
-    image_input="https://example.com/image.jpg",
-    prompt_input="What do you see in this image?",
-    max_tokens=200
-)
-
-# Query with local image and prompt file
-response = client.query(
-    image_input="./images/car.jpg",
-    prompt_input="./prompts/car_wash_inspection.txt",
-    max_tokens=500,
-    temperature=0.7
-)
-
-# Extract response text
-result = response['choices'][0]['message']['content']
-print(result)
+# With custom parameters
+python main.py batch-infer \
+  images/sample_images/images \
+  prompts/car_contamination_classification_prompt_v5.txt \
+  results/inference_results.csv \
+  --model qwen3-vl-4b-instruct \
+  --max-tokens 1000 \
+  --temperature 0.0
 ```
 
-## Image Format Support
+**Output CSV Format:**
+The CSV includes:
+- `image_name`: Image filename
+- `model`: Model used for inference
+- `latency_seconds`: Processing time
+- `success`: Whether inference succeeded
+- `image_type`: interior/exterior/ood
+- `{area}_contamination_type`: Contamination type for each area
+- `{area}_severity`: Severity level for each area
 
-Supported image formats:
+**Options:**
+- `--api-url`: VLM API endpoint URL
+- `--model`: Model name (default: qwen3-vl-4b-instruct)
+- `--max-tokens`: Maximum tokens to generate (default: 1000)
+- `--temperature`: Sampling temperature (default: 0.0)
+- `--limit`: Maximum number of images to process (default: all)
+
+---
+
+### 3. Generate Prompt (`generate-prompt`)
+
+Generate a prompt template from a guideline CSV file using Jinja2 templates.
+
+```bash
+python main.py generate-prompt <guideline_csv> [output_path] [OPTIONS]
+```
+
+**Example:**
+```bash
+# Auto-generate with version numbering
+python main.py generate-prompt guideline/guideline_v1.csv
+
+# Save to specific location
+python main.py generate-prompt \
+  guideline/guideline_v1.csv \
+  prompts/custom_prompt.txt
+
+# Save transformed guideline
+python main.py generate-prompt \
+  guideline/guideline_v1.csv \
+  --save-transformed
+
+# Use specific template version
+python main.py generate-prompt \
+  guideline/guideline_v1.csv \
+  --template-version 1
+```
+
+**Options:**
+- `--save-transformed`: Save transformed guideline CSV
+- `--template-version`: Template version to use (default: 1)
+
+**Guideline CSV Format:**
+```csv
+오염항목,내/외부 구분,양호 (Good),보통 (Normal),심각 (Critical)
+오염/때 (부스러기),내부,Description for good,Description for normal,Description for critical
+```
+
+The command transforms this into a structured prompt using Jinja2 templates located in `prompts/templates/`.
+
+---
+
+## Help
+
+For detailed help on any command:
+
+```bash
+# General help
+python main.py --help
+
+# Command-specific help
+python main.py infer --help
+python main.py batch-infer --help
+python main.py generate-prompt --help
+```
+
+## Supported Image Formats
+
 - JPEG (.jpg, .jpeg)
 - PNG (.png)
 - GIF (.gif)
@@ -117,42 +167,3 @@ Supported image formats:
 - BMP (.bmp)
 
 Local images are automatically converted to base64 data URLs before sending to the API.
-
-## Error Handling
-
-The client handles common errors:
-- File not found (for local images or prompt files)
-- Network errors (connection timeout, HTTP errors)
-- API errors (invalid response format)
-
-All errors are reported with descriptive messages to help with debugging.
-
-## Original cURL Command
-
-This Python client replicates the following cURL command:
-
-```bash
-curl -L -X POST http://vllm.mlops.socarcorp.co.kr/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "qwen3-vl-4b-instruct",
-    "messages": [
-      {
-        "role": "user",
-        "content": [
-          {
-            "type": "image_url",
-            "image_url": {
-              "url": "https://example.com/image.jpg"
-            }
-          },
-          {
-            "type": "text",
-            "text": "What do you see in this image?"
-          }
-        ]
-      }
-    ],
-    "max_tokens": 200
-  }'
-```

@@ -19,10 +19,14 @@ class VLMClient:
 
     def _load_prompt(self, prompt_input: str) -> str:
         """Load prompt from text file or use as direct string."""
-        prompt_path = Path(prompt_input)
+        # Check if it's a very long string (likely already loaded prompt text)
+        # or contains newlines (likely direct prompt text)
+        if len(prompt_input) > 500 or "\n" in prompt_input:
+            return prompt_input
 
         # If it looks like a file path, try to load it
         if "/" in prompt_input or "\\" in prompt_input or prompt_input.endswith(".txt"):
+            prompt_path = Path(prompt_input)
             if not prompt_path.exists():
                 raise PromptNotFoundError(prompt_input)
             if not prompt_path.is_file():
