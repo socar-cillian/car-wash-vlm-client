@@ -200,8 +200,8 @@ def process_image(
 
                 result = json.loads(json_str)
 
-                # Validate and normalize the result
-                result = _normalize_inference_result(result, image_path.name)
+                # Note: Normalization disabled - keep Korean values as-is
+                # result = _normalize_inference_result(result, image_path.name)
             except json.JSONDecodeError as e:
                 print(f"Warning: Failed to parse JSON for {image_path.name}: {e}")
                 print(f"Raw content: {content[:200]}...")
