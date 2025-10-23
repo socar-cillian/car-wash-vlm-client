@@ -1,6 +1,5 @@
 """Streamlit dashboard for visualizing car contamination inference results."""
 
-import csv
 from pathlib import Path
 
 import pandas as pd
@@ -39,14 +38,11 @@ def display_area_results(row: pd.Series, areas: list[str]) -> None:
 
 
 def main():
-    st.set_page_config(
-        page_title="Car Contamination Dashboard",
-        page_icon="🚗",
-        layout="wide"
-    )
+    st.set_page_config(page_title="Car Contamination Dashboard", page_icon="🚗", layout="wide")
 
     # Custom CSS for image height control
-    st.markdown("""
+    st.markdown(
+        """
         <style>
         /* Limit image height to match results column */
         [data-testid="stImage"] img {
@@ -60,7 +56,9 @@ def main():
             object-fit: contain;
         }
         </style>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
     st.title("🚗 Car Contamination Classification Dashboard")
     st.markdown("---")
@@ -71,14 +69,10 @@ def main():
 
         # File paths
         csv_path = st.text_input(
-            "결과 CSV 경로",
-            value="results/inference_results.csv",
-            help="Inference results CSV file path"
+            "결과 CSV 경로", value="results/inference_results.csv", help="Inference results CSV file path"
         )
         images_dir = st.text_input(
-            "이미지 디렉토리",
-            value="images/sample_images/images",
-            help="Directory containing images"
+            "이미지 디렉토리", value="images/sample_images/images", help="Directory containing images"
         )
 
         # Load data button
@@ -132,22 +126,18 @@ def main():
         image_type_filter = st.multiselect(
             "이미지 타입",
             options=df["image_type"].unique() if "image_type" in df.columns else [],
-            default=df["image_type"].unique() if "image_type" in df.columns else []
+            default=df["image_type"].unique() if "image_type" in df.columns else [],
         )
 
     with filter_col2:
         gt_area_filter = st.multiselect(
             "GT 영역",
             options=df["gt_contamination_area"].unique() if "gt_contamination_area" in df.columns else [],
-            default=df["gt_contamination_area"].unique() if "gt_contamination_area" in df.columns else []
+            default=df["gt_contamination_area"].unique() if "gt_contamination_area" in df.columns else [],
         )
 
     with filter_col3:
-        success_filter = st.selectbox(
-            "추론 성공 여부",
-            options=["전체", "성공", "실패"],
-            index=0
-        )
+        success_filter = st.selectbox("추론 성공 여부", options=["전체", "성공", "실패"], index=0)
 
     # Apply filters
     filtered_df = df.copy()
@@ -156,9 +146,9 @@ def main():
     if gt_area_filter and "gt_contamination_area" in df.columns:
         filtered_df = filtered_df[filtered_df["gt_contamination_area"].isin(gt_area_filter)]
     if success_filter == "성공":
-        filtered_df = filtered_df[filtered_df["success"] == True]
+        filtered_df = filtered_df[filtered_df["success"]]
     elif success_filter == "실패":
-        filtered_df = filtered_df[filtered_df["success"] == False]
+        filtered_df = filtered_df[~filtered_df["success"]]
 
     st.info(f"필터링된 결과: {len(filtered_df)} / {len(df)} 이미지")
 
@@ -172,12 +162,7 @@ def main():
         return
 
     # Image selector
-    image_idx = st.slider(
-        "이미지 선택",
-        min_value=0,
-        max_value=len(filtered_df) - 1,
-        value=0
-    )
+    image_idx = st.slider("이미지 선택", min_value=0, max_value=len(filtered_df) - 1, value=0)
 
     row = filtered_df.iloc[image_idx]
     image_name = row["image_name"]
@@ -252,7 +237,7 @@ def main():
         label="필터링된 결과 다운로드 (CSV)",
         data=filtered_df.to_csv(index=False).encode("utf-8"),
         file_name=f"filtered_results_{len(filtered_df)}.csv",
-        mime="text/csv"
+        mime="text/csv",
     )
 
 

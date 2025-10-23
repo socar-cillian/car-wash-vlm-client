@@ -4,10 +4,17 @@ from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
+from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Prompt
+from rich.table import Table
 
 from src.api import VLMClient
 from src.inference import run_batch_inference
 from src.prompts import generate_prompt_template, save_transformed_guideline, transform_guideline_csv
+
+
+console = Console()
 
 
 app = typer.Typer(
@@ -25,7 +32,7 @@ def single_inference(
         str,
         typer.Option(help="VLM API endpoint URL"),
     ] = "http://vllm.mlops.socarcorp.co.kr/v1/chat/completions",
-    model: Annotated[str, typer.Option(help="Model name")] = "qwen25-vl-7b-instruct-awq",
+    model: Annotated[str, typer.Option(help="Model name")] = "qwen3-vl-8b-instruct",
     max_tokens: Annotated[int, typer.Option(help="Maximum tokens to generate")] = 1000,
     temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
     output: Annotated[Optional[Path], typer.Option(help="Output file path (optional)")] = None,
@@ -95,44 +102,71 @@ def single_inference(
 
 @app.command("batch-infer")
 def batch_inference(
-    input_csv: Annotated[Path, typer.Argument(help="Input CSV file with file_name and GT columns")],
-    images_dir: Annotated[Path, typer.Argument(help="Directory containing images")],
-    prompt: Annotated[Path, typer.Argument(help="Path to prompt file")],
-    output: Annotated[Path, typer.Argument(help="Output CSV file path")],
+    input_csv: Annotated[Optional[Path], typer.Argument(help="Input CSV file with file_name and GT columns")] = None,
+    images_dir: Annotated[Optional[Path], typer.Argument(help="Directory containing images")] = None,
+    prompt: Annotated[Optional[Path], typer.Argument(help="Path to prompt file")] = None,
+    output: Annotated[Optional[Path], typer.Argument(help="Output CSV file path")] = None,
     api_url: Annotated[
         str,
         typer.Option(help="VLM API endpoint URL"),
     ] = "http://vllm.mlops.socarcorp.co.kr/v1/chat/completions",
-    model: Annotated[str, typer.Option(help="Model name")] = "qwen25-vl-7b-instruct-awq",
+    model: Annotated[str, typer.Option(help="Model name")] = "qwen3-vl-8b-instruct",
     max_tokens: Annotated[int, typer.Option(help="Maximum tokens to generate")] = 1000,
     temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
     limit: Annotated[Optional[int], typer.Option(help="Maximum number of images to process (default: all)")] = None,
 ):
     """Run batch inference on multiple images specified in CSV file."""
-    typer.echo("=" * 60)
-    typer.echo("Batch Inference")
-    typer.echo("=" * 60)
+    console.print(Panel.fit("🚗 Batch Inference", style="bold magenta"))
+
+    # Interactive input if arguments not provided
+    if input_csv is None:
+        console.print()
+        input_csv_str = Prompt.ask("[cyan]📄 Input CSV file path[/cyan]")
+        input_csv = Path(input_csv_str)
+
+    if images_dir is None:
+        images_dir_str = Prompt.ask("[cyan]📁 Images directory path[/cyan]")
+        images_dir = Path(images_dir_str)
+
+    if prompt is None:
+        prompt_str = Prompt.ask("[cyan]📝 Prompt file path[/cyan]")
+        prompt = Path(prompt_str)
+
+    if output is None:
+        output_str = Prompt.ask("[cyan]💾 Output CSV file path[/cyan]")
+        output = Path(output_str)
+
+    console.print()
 
     # Validate paths
     if not input_csv.exists():
-        typer.echo(f"Error: Input CSV file not found: {input_csv}", err=True)
+        console.print(f"[red]❌ Error: Input CSV file not found: {input_csv}[/red]")
         raise typer.Exit(1)
 
     if not images_dir.exists():
-        typer.echo(f"Error: Images directory not found: {images_dir}", err=True)
+        console.print(f"[red]❌ Error: Images directory not found: {images_dir}[/red]")
         raise typer.Exit(1)
 
     if not prompt.exists():
-        typer.echo(f"Error: Prompt file not found: {prompt}", err=True)
+        console.print(f"[red]❌ Error: Prompt file not found: {prompt}[/red]")
         raise typer.Exit(1)
 
-    typer.echo(f"Input CSV: {input_csv}")
-    typer.echo(f"Images directory: {images_dir}")
-    typer.echo(f"Prompt file: {prompt}")
-    typer.echo(f"Output CSV: {output}")
-    typer.echo(f"API URL: {api_url}")
-    typer.echo(f"Model: {model}")
-    typer.echo()
+    # Display configuration in a table
+    config_table = Table(title="⚙️  Configuration", show_header=False, box=None)
+    config_table.add_column("Key", style="cyan", width=20)
+    config_table.add_column("Value", style="white")
+
+    config_table.add_row("📄 Input CSV", str(input_csv))
+    config_table.add_row("📁 Images directory", str(images_dir))
+    config_table.add_row("📝 Prompt file", str(prompt))
+    config_table.add_row("💾 Output CSV", str(output))
+    config_table.add_row("🌐 API URL", api_url)
+    config_table.add_row("🤖 Model", model)
+    if limit:
+        config_table.add_row("🔢 Limit", str(limit))
+
+    console.print(config_table)
+    console.print()
 
     try:
         summary = run_batch_inference(
@@ -147,24 +181,58 @@ def batch_inference(
             limit=limit,
         )
 
-        typer.echo("\n" + "=" * 60)
-        typer.echo("Summary")
-        typer.echo("=" * 60)
-        typer.echo(f"Total images: {summary['total']}")
-        typer.echo(f"Successful: {summary['successful']}")
-        typer.echo(f"Failed: {summary['failed']}")
-        typer.echo(f"Average latency: {summary['avg_latency']:.3f}s")
-        typer.echo(f"Results saved to: {summary['output_path']}")
+        # Display summary in a table
+        console.print()
+        summary_table = Table(title="📊 Summary", show_header=False, box=None)
+        summary_table.add_column("Key", style="cyan", width=20)
+        summary_table.add_column("Value", style="white")
 
-        typer.echo("\n" + "=" * 60)
-        typer.echo("✓ Batch inference completed successfully!")
-        typer.echo("=" * 60)
+        summary_table.add_row("🖼️  Total images", str(summary["total"]))
+        summary_table.add_row("✅ Successful", f"[green]{summary['successful']}[/green]")
+        summary_table.add_row("❌ Failed", f"[red]{summary['failed']}[/red]")
+        summary_table.add_row("⚡ Average latency", f"{summary['avg_latency']:.3f}s")
+        summary_table.add_row("💾 Results saved to", str(summary["output_path"]))
+
+        console.print(summary_table)
+        console.print()
+        console.print(Panel.fit("✓ Batch inference completed successfully!", style="bold green"))
 
     except Exception as e:
-        typer.echo(f"Error: {e}", err=True)
+        console.print(f"[red]❌ Error: {e}[/red]")
         import traceback
 
         traceback.print_exc()
+        raise typer.Exit(1) from e
+
+
+@app.command("dashboard")
+def launch_dashboard(
+    port: Annotated[int, typer.Option(help="Port to run the dashboard on")] = 8501,
+):
+    """Launch the Streamlit dashboard for visualizing inference results."""
+    import subprocess
+    import sys
+
+    console.print(Panel.fit("📊 Launching Streamlit Dashboard", style="bold magenta"))
+    console.print()
+    console.print(f"[cyan]🌐 Dashboard will be available at:[/cyan] [green]http://localhost:{port}[/green]")
+    console.print("[cyan]📂 Default CSV path:[/cyan] results/inference_results.csv")
+    console.print("[cyan]📁 Default images path:[/cyan] images/sample_images/images")
+    console.print()
+    console.print("[yellow]Press Ctrl+C to stop the server[/yellow]")
+    console.print()
+
+    try:
+        # Run streamlit
+        subprocess.run(
+            [sys.executable, "-m", "streamlit", "run", "src/dashboard/app.py", "--server.port", str(port)],
+            check=True,
+        )
+    except KeyboardInterrupt:
+        console.print()
+        console.print(Panel.fit("✓ Dashboard stopped", style="bold green"))
+    except subprocess.CalledProcessError as e:
+        console.print(f"[red]❌ Error running dashboard: {e}[/red]")
         raise typer.Exit(1) from e
 
 
