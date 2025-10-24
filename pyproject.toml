@@ -17,6 +17,8 @@ dependencies = [
     "pillow>=10.0.0",
     "rich>=13.0.0",
     "tqdm>=4.66.0",
+    "langfuse>=2.0.0",
+    "python-dotenv>=1.0.0",
 ]
 
 [project.scripts]
@@ -29,7 +31,7 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["src", "src.api", "src.inference", "src.prompts", "src.dashboard"]
+packages = ["src", "src.api", "src.inference", "src.prompts", "src.dashboard", "src.monitoring"]
 
 [tool.ruff]
 line-length = 120

@@ -5,11 +5,11 @@ import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Optional
 
 from tqdm import tqdm
 
 from src.api import VLMClient
+from src.monitoring import get_langfuse_monitor
 
 
 # Fixed vehicle areas (Korean)
@@ -179,6 +179,7 @@ def process_image(
             prompt_input=prompt,
             max_tokens=max_tokens,
             temperature=temperature,
+            image_name=image_path.name,
         )
 
         latency = time.time() - start_time
@@ -324,8 +325,9 @@ def run_batch_inference(
     model: str,
     max_tokens: int,
     temperature: float,
-    limit: Optional[int] = None,
+    limit: int | None = None,
     max_workers: int = 16,
+    enable_langfuse: bool = True,
 ) -> dict:
     """
     Run batch inference on images specified in CSV file with parallel processing.
@@ -341,15 +343,19 @@ def run_batch_inference(
         temperature: Sampling temperature
         limit: Maximum number of images to process (default: all)
         max_workers: Number of parallel workers (default: 16)
+        enable_langfuse: Whether to enable Langfuse monitoring (default: True)
 
     Returns:
         Dictionary with summary statistics
     """
+    # Initialize Langfuse monitor
+    langfuse_monitor = get_langfuse_monitor(enabled=enable_langfuse)
+
     # Load prompt
     prompt = load_prompt(prompt_path)
 
-    # Initialize client
-    client = VLMClient(api_url=api_url, model=model)
+    # Initialize client with langfuse monitoring
+    client = VLMClient(api_url=api_url, model=model, langfuse_monitor=langfuse_monitor)
 
     # Load input CSV with ground truth data
     print(f"Loading input CSV from {input_csv}")
@@ -495,6 +501,44 @@ def run_batch_inference(
 
     # Calculate per-image time (wall clock time divided by number of images)
     avg_time_per_image = total_elapsed_time / len(results) if results else 0
+    speedup = avg_latency / avg_time_per_image if avg_time_per_image > 0 else 1
+
+    # Log summary to Langfuse using trace
+    if langfuse_monitor.enabled:
+        trace = langfuse_monitor.start_trace_span(
+            name="batch_inference",
+            input_data={
+                "input_csv": str(input_csv),
+                "images_dir": str(images_dir),
+                "model": model,
+                "max_workers": max_workers,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            },
+            metadata={
+                "total_images": len(results),
+                "successful": successful,
+                "failed": failed,
+                "success_rate": successful / len(results) if results else 0,
+            },
+        )
+        if trace:
+            with trace as span:
+                span.update(
+                    output={
+                        "total_images": len(results),
+                        "successful": successful,
+                        "failed": failed,
+                        "avg_latency": avg_latency,
+                        "total_time": total_elapsed_time,
+                        "avg_time_per_image": avg_time_per_image,
+                        "speedup": speedup,
+                        "output_path": str(output_csv),
+                    }
+                )
+
+        # Flush all events to Langfuse
+        langfuse_monitor.flush()
 
     return {
         "total": len(results),

@@ -1,7 +1,7 @@
 """Integrated CLI for car contamination classification."""
 
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated
 
 import typer
 from rich.console import Console
@@ -35,7 +35,7 @@ def single_inference(
     model: Annotated[str, typer.Option(help="Model name")] = "qwen3-vl-8b-instruct",
     max_tokens: Annotated[int, typer.Option(help="Maximum tokens to generate")] = 1000,
     temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
-    output: Annotated[Optional[Path], typer.Option(help="Output file path (optional)")] = None,
+    output: Annotated[Path | None, typer.Option(help="Output file path (optional)")] = None,
 ):
     """Run inference on a single image."""
     typer.echo("=" * 60)
@@ -102,10 +102,10 @@ def single_inference(
 
 @app.command("batch-infer")
 def batch_inference(
-    input_csv: Annotated[Optional[Path], typer.Argument(help="Input CSV file with file_name and GT columns")] = None,
-    images_dir: Annotated[Optional[Path], typer.Argument(help="Directory containing images")] = None,
-    prompt: Annotated[Optional[Path], typer.Argument(help="Path to prompt file")] = None,
-    output: Annotated[Optional[Path], typer.Argument(help="Output CSV file path")] = None,
+    input_csv: Annotated[Path | None, typer.Argument(help="Input CSV file with file_name and GT columns")] = None,
+    images_dir: Annotated[Path | None, typer.Argument(help="Directory containing images")] = None,
+    prompt: Annotated[Path | None, typer.Argument(help="Path to prompt file")] = None,
+    output: Annotated[Path | None, typer.Argument(help="Output CSV file path")] = None,
     api_url: Annotated[
         str,
         typer.Option(help="VLM API endpoint URL"),
@@ -113,8 +113,11 @@ def batch_inference(
     model: Annotated[str, typer.Option(help="Model name")] = "qwen3-vl-8b-instruct",
     max_tokens: Annotated[int, typer.Option(help="Maximum tokens to generate")] = 1000,
     temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
-    limit: Annotated[Optional[int], typer.Option(help="Maximum number of images to process (default: all)")] = None,
+    limit: Annotated[int | None, typer.Option(help="Maximum number of images to process (default: all)")] = None,
     max_workers: Annotated[int, typer.Option(help="Number of parallel workers (default: 16)")] = 16,
+    enable_langfuse: Annotated[
+        bool, typer.Option("--enable-langfuse/--no-langfuse", help="Enable Langfuse monitoring")
+    ] = True,
 ):
     """Run batch inference on multiple images specified in CSV file."""
     console.print(Panel.fit("🚗 Batch Inference", style="bold magenta"))
@@ -164,6 +167,7 @@ def batch_inference(
     config_table.add_row("🌐 API URL", api_url)
     config_table.add_row("🤖 Model", model)
     config_table.add_row("⚡ Workers", str(max_workers))
+    config_table.add_row("📊 Langfuse", "[green]Enabled[/green]" if enable_langfuse else "[red]Disabled[/red]")
     if limit:
         config_table.add_row("🔢 Limit", str(limit))
 
@@ -182,6 +186,7 @@ def batch_inference(
             temperature=temperature,
             limit=limit,
             max_workers=max_workers,
+            enable_langfuse=enable_langfuse,
         )
 
         # Display summary in a table
@@ -251,7 +256,7 @@ def launch_dashboard(
 @app.command("generate-prompt")
 def generate_prompt(
     guideline: Annotated[Path, typer.Argument(help="Path to guideline CSV file")],
-    output: Annotated[Optional[Path], typer.Argument(help="Output prompt file path (optional)")] = None,
+    output: Annotated[Path | None, typer.Argument(help="Output prompt file path (optional)")] = None,
     save_transformed: Annotated[
         bool, typer.Option("--save-transformed", help="Save transformed guideline CSV")
     ] = False,

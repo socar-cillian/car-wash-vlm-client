@@ -1,6 +1,7 @@
 """VLM Client for interacting with Vision Language Model API."""
 
 import base64
+import time
 from pathlib import Path
 
 import requests
@@ -15,9 +16,15 @@ class VLMClient:
 
     SUPPORTED_IMAGE_FORMATS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 
-    def __init__(self, api_url: str, model: str = "qwen3-vl-4b-instruct"):
+    def __init__(
+        self,
+        api_url: str,
+        model: str = "qwen3-vl-4b-instruct",
+        langfuse_monitor=None,
+    ):
         self.api_url = api_url
         self.model = model
+        self.langfuse_monitor = langfuse_monitor
 
         # Setup session with retry logic
         self.session = requests.Session()
@@ -96,6 +103,7 @@ class VLMClient:
         max_tokens: int = 8192,
         temperature: float = 0.1,
         response_format: dict = None,
+        image_name: str | None = None,
     ) -> dict:
         """
         Send a query to the VLM API.
@@ -106,6 +114,7 @@ class VLMClient:
             max_tokens: Maximum tokens to generate
             temperature: Sampling temperature
             response_format: Response format configuration (e.g., {"type": "json_object"})
+            image_name: Name of the image for logging purposes
 
         Returns:
             API response as dictionary
@@ -116,9 +125,15 @@ class VLMClient:
             InvalidImageFormatError: If image format is not supported
             requests.exceptions.RequestException: If API request fails
         """
+        start_time = time.time()
+
         # Prepare image and prompt
         image_url = self._prepare_image(image_input)
         prompt = self._load_prompt(prompt_input)
+
+        # Get image name for logging
+        if image_name is None:
+            image_name = Path(image_input).name if not image_input.startswith("http") else "url_image"
 
         # Build request payload
         payload = {
@@ -140,10 +155,63 @@ class VLMClient:
         if response_format is not None:
             payload["response_format"] = response_format
 
+        # Log to Langfuse if enabled
+        generation = None
+        if self.langfuse_monitor and self.langfuse_monitor.enabled:
+            try:
+                generation = self.langfuse_monitor.start_generation(
+                    name=f"vlm_inference_{image_name}",
+                    model=self.model,
+                    input_data={
+                        "image": image_name,
+                        "prompt": prompt[:200] + "..." if len(prompt) > 200 else prompt,
+                    },
+                    model_parameters={
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                    },
+                    metadata={
+                        "image_name": image_name,
+                        "api_url": self.api_url,
+                    },
+                )
+            except Exception as e:
+                print(f"Warning: Failed to start Langfuse generation: {e}")
+                generation = None
+
         # Send request with retry and increased timeout
         headers = {"Content-Type": "application/json"}
         response = self.session.post(self.api_url, headers=headers, json=payload, timeout=120)
 
         response.raise_for_status()
 
-        return response.json()
+        result = response.json()
+        end_time = time.time()
+        latency = end_time - start_time
+
+        # Update generation with results if using context manager
+        if generation:
+            try:
+                with generation as gen:
+                    # Extract response content
+                    output_text = ""
+                    if "choices" in result and len(result["choices"]) > 0:
+                        output_text = result["choices"][0]["message"]["content"]
+
+                    # Extract usage information if available
+                    usage = result.get("usage", {})
+
+                    # Update generation with output
+                    gen.update(
+                        output={"response": output_text[:500] + "..." if len(output_text) > 500 else output_text},
+                        usage=usage if usage else None,
+                        metadata={
+                            "image_name": image_name,
+                            "api_url": self.api_url,
+                            "latency_seconds": latency,
+                        },
+                    )
+            except Exception as e:
+                print(f"Warning: Failed to update Langfuse generation: {e}")
+
+        return result
