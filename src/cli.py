@@ -114,6 +114,7 @@ def batch_inference(
     max_tokens: Annotated[int, typer.Option(help="Maximum tokens to generate")] = 1000,
     temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
     limit: Annotated[Optional[int], typer.Option(help="Maximum number of images to process (default: all)")] = None,
+    max_workers: Annotated[int, typer.Option(help="Number of parallel workers (default: 16)")] = 16,
 ):
     """Run batch inference on multiple images specified in CSV file."""
     console.print(Panel.fit("🚗 Batch Inference", style="bold magenta"))
@@ -162,6 +163,7 @@ def batch_inference(
     config_table.add_row("💾 Output CSV", str(output))
     config_table.add_row("🌐 API URL", api_url)
     config_table.add_row("🤖 Model", model)
+    config_table.add_row("⚡ Workers", str(max_workers))
     if limit:
         config_table.add_row("🔢 Limit", str(limit))
 
@@ -179,22 +181,32 @@ def batch_inference(
             max_tokens=max_tokens,
             temperature=temperature,
             limit=limit,
+            max_workers=max_workers,
         )
 
         # Display summary in a table
         console.print()
         summary_table = Table(title="📊 Summary", show_header=False, box=None)
-        summary_table.add_column("Key", style="cyan", width=20)
+        summary_table.add_column("Key", style="cyan", width=25)
         summary_table.add_column("Value", style="white")
 
         summary_table.add_row("🖼️  Total images", str(summary["total"]))
         summary_table.add_row("✅ Successful", f"[green]{summary['successful']}[/green]")
         summary_table.add_row("❌ Failed", f"[red]{summary['failed']}[/red]")
-        summary_table.add_row("⚡ Average latency", f"{summary['avg_latency']:.3f}s")
+        summary_table.add_row("⏱️  Total time", f"[bold yellow]{summary['total_time']:.2f}s[/bold yellow]")
+        summary_table.add_row("📊 Time per image (avg)", f"[bold cyan]{summary['avg_time_per_image']:.2f}s[/bold cyan]")
+        summary_table.add_row("⚡ API latency (avg)", f"{summary['avg_latency']:.3f}s")
         summary_table.add_row("💾 Results saved to", str(summary["output_path"]))
 
         console.print(summary_table)
         console.print()
+
+        # Calculate and display speedup information
+        speedup = summary["avg_latency"] / summary["avg_time_per_image"] if summary["avg_time_per_image"] > 0 else 1
+        speedup_info = f"🚀 Parallel speedup: [bold green]{speedup:.1f}x faster[/bold green] than sequential processing"
+        console.print(speedup_info)
+        console.print()
+
         console.print(Panel.fit("✓ Batch inference completed successfully!", style="bold green"))
 
     except Exception as e:

@@ -3,8 +3,11 @@
 import csv
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
+
+from tqdm import tqdm
 
 from src.api import VLMClient
 
@@ -322,9 +325,10 @@ def run_batch_inference(
     max_tokens: int,
     temperature: float,
     limit: Optional[int] = None,
+    max_workers: int = 16,
 ) -> dict:
     """
-    Run batch inference on images specified in CSV file.
+    Run batch inference on images specified in CSV file with parallel processing.
 
     Args:
         input_csv: CSV file containing image filenames and ground truth data
@@ -336,6 +340,7 @@ def run_batch_inference(
         max_tokens: Maximum tokens to generate
         temperature: Sampling temperature
         limit: Maximum number of images to process (default: all)
+        max_workers: Number of parallel workers (default: 16)
 
     Returns:
         Dictionary with summary statistics
@@ -372,54 +377,92 @@ def run_batch_inference(
         image_data = image_data[:limit]
         print(f"Processing first {len(image_data)} images (limit applied)")
 
-    # Process images
+    print(f"Starting parallel inference with {max_workers} workers...")
+    print()
+
+    # Start timer for total processing time
+    total_start_time = time.time()
+
+    # Process images in parallel
     results = []
-    for i, data in enumerate(image_data, 1):
-        file_name = data["file_name"]
-        image_path = images_dir / file_name
+    futures_to_data = {}
 
-        print(f"[{i}/{len(image_data)}] Processing {file_name}...")
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        for data in image_data:
+            file_name = data["file_name"]
+            image_path = images_dir / file_name
 
-        # Check if image exists
-        if not image_path.exists():
-            print(f"  ✗ File not found: {image_path}")
-            row = {
-                "image_name": file_name,
-                "gt_contamination_area": data["gt_contamination_area"],
-                "gt_contamination_type": data["gt_contamination_type"],
-                "model": model,
-                "latency_seconds": "0.000",
-                "success": False,
-                "error": "file_not_found",
-                "image_type": "",
-            }
-            # Add empty columns for all areas
-            for area in ALL_AREAS:
-                row[f"{area}_contamination_type"] = ""
-                row[f"{area}_severity"] = ""
-            results.append(row)
-            continue
+            # Check if image exists before submitting
+            if not image_path.exists():
+                row = {
+                    "image_name": file_name,
+                    "gt_contamination_area": data["gt_contamination_area"],
+                    "gt_contamination_type": data["gt_contamination_type"],
+                    "model": model,
+                    "latency_seconds": "0.000",
+                    "success": False,
+                    "error": "file_not_found",
+                    "image_type": "",
+                }
+                # Add empty columns for all areas
+                for area in ALL_AREAS:
+                    row[f"{area}_contamination_type"] = ""
+                    row[f"{area}_severity"] = ""
+                results.append(row)
+                continue
 
-        inference_result = process_image(
-            client=client,
-            image_path=image_path,
-            prompt=prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
+            # Submit inference task
+            future = executor.submit(
+                process_image,
+                client,
+                image_path,
+                prompt,
+                max_tokens,
+                temperature,
+            )
+            futures_to_data[future] = (data, image_path)
 
-        row = create_csv_row(image_path, inference_result, model)
+        # Process completed tasks with progress bar
+        with tqdm(total=len(futures_to_data), desc="Processing images", unit="img") as pbar:
+            for future in as_completed(futures_to_data):
+                data, image_path = futures_to_data[future]
 
-        # Add ground truth columns from CSV
-        row["gt_contamination_area"] = data["gt_contamination_area"]
-        row["gt_contamination_type"] = data["gt_contamination_type"]
+                try:
+                    inference_result = future.result()
+                    row = create_csv_row(image_path, inference_result, model)
 
-        results.append(row)
+                    # Add ground truth columns from CSV
+                    row["gt_contamination_area"] = data["gt_contamination_area"]
+                    row["gt_contamination_type"] = data["gt_contamination_type"]
 
-        if inference_result["success"]:
-            print(f"  ✓ Success (latency: {inference_result['latency']:.3f}s)")
-        else:
-            print(f"  ✗ Failed: {inference_result.get('error', 'unknown')}")
+                    results.append(row)
+
+                    # Update progress bar description
+                    if inference_result["success"]:
+                        pbar.set_postfix_str(f"✓ {image_path.name} ({inference_result['latency']:.2f}s)")
+                    else:
+                        pbar.set_postfix_str(f"✗ {image_path.name}")
+
+                except Exception as e:
+                    # Handle unexpected errors
+                    row = {
+                        "image_name": image_path.name,
+                        "gt_contamination_area": data["gt_contamination_area"],
+                        "gt_contamination_type": data["gt_contamination_type"],
+                        "model": model,
+                        "latency_seconds": "0.000",
+                        "success": False,
+                        "error": str(e),
+                        "image_type": "",
+                    }
+                    for area in ALL_AREAS:
+                        row[f"{area}_contamination_type"] = ""
+                        row[f"{area}_severity"] = ""
+                    results.append(row)
+                    pbar.set_postfix_str(f"✗ {image_path.name} (error)")
+
+                pbar.update(1)
 
     # Save results
     fieldnames = [
@@ -442,15 +485,23 @@ def run_batch_inference(
         writer.writeheader()
         writer.writerows(results)
 
+    # Calculate total processing time
+    total_elapsed_time = time.time() - total_start_time
+
     # Calculate summary
     successful = sum(1 for r in results if r["success"])
     failed = len(results) - successful
     avg_latency = sum(float(r["latency_seconds"]) for r in results) / len(results)
+
+    # Calculate per-image time (wall clock time divided by number of images)
+    avg_time_per_image = total_elapsed_time / len(results) if results else 0
 
     return {
         "total": len(results),
         "successful": successful,
         "failed": failed,
         "avg_latency": avg_latency,
+        "total_time": total_elapsed_time,
+        "avg_time_per_image": avg_time_per_image,
         "output_path": output_csv,
     }

@@ -16,13 +16,20 @@ dependencies = [
     "pandas>=2.0.0",
     "pillow>=10.0.0",
     "rich>=13.0.0",
+    "tqdm>=4.66.0",
 ]
+
+[project.scripts]
+carwash = "src.cli:main"
 
 [project.optional-dependencies]
 dev = [
     "pre-commit>=3.5.0",
     "ruff>=0.8.0",
 ]
+
+[tool.setuptools]
+packages = ["src", "src.api", "src.inference", "src.prompts", "src.dashboard"]
 
 [tool.ruff]
 line-length = 120

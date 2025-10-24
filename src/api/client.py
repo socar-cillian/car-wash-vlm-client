@@ -4,6 +4,8 @@ import base64
 from pathlib import Path
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from .exceptions import ImageNotFoundError, InvalidImageFormatError, PromptNotFoundError
 
@@ -16,6 +18,17 @@ class VLMClient:
     def __init__(self, api_url: str, model: str = "qwen3-vl-4b-instruct"):
         self.api_url = api_url
         self.model = model
+
+        # Setup session with retry logic
+        self.session = requests.Session()
+        retry_strategy = Retry(
+            total=3,  # Total number of retries
+            backoff_factor=1,  # Wait 1, 2, 4 seconds between retries
+            status_forcelist=[500, 502, 503, 504],  # Retry on server errors
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
 
     def _load_prompt(self, prompt_input: str) -> str:
         """Load prompt from text file or use as direct string."""
@@ -127,9 +140,9 @@ class VLMClient:
         if response_format is not None:
             payload["response_format"] = response_format
 
-        # Send request
+        # Send request with retry and increased timeout
         headers = {"Content-Type": "application/json"}
-        response = requests.post(self.api_url, headers=headers, json=payload, timeout=60)
+        response = self.session.post(self.api_url, headers=headers, json=payload, timeout=120)
 
         response.raise_for_status()
 
