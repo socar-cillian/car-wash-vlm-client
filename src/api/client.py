@@ -19,7 +19,7 @@ class VLMClient:
     def __init__(
         self,
         api_url: str,
-        model: str = "qwen3-vl-4b-instruct",
+        model: str = "qwen3-vl-8b-instruct",
         langfuse_monitor=None,
     ):
         self.api_url = api_url

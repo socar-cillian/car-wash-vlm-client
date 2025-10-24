@@ -31,7 +31,7 @@ def single_inference(
     api_url: Annotated[
         str,
         typer.Option(help="VLM API endpoint URL"),
-    ] = "http://vllm.mlops.socarcorp.co.kr/v1/chat/completions",
+    ] = "https://vllm-test.mlops.socarcorp.co.kr/v1/chat/completions",
     model: Annotated[str, typer.Option(help="Model name")] = "qwen3-vl-8b-instruct",
     max_tokens: Annotated[int, typer.Option(help="Maximum tokens to generate")] = 1000,
     temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
@@ -109,7 +109,7 @@ def batch_inference(
     api_url: Annotated[
         str,
         typer.Option(help="VLM API endpoint URL"),
-    ] = "http://vllm.mlops.socarcorp.co.kr/v1/chat/completions",
+    ] = "https://vllm-test.mlops.socarcorp.co.kr/v1/chat/completions",
     model: Annotated[str, typer.Option(help="Model name")] = "qwen3-vl-8b-instruct",
     max_tokens: Annotated[int, typer.Option(help="Maximum tokens to generate")] = 1000,
     temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
@@ -195,21 +195,21 @@ def batch_inference(
         summary_table.add_column("Key", style="cyan", width=25)
         summary_table.add_column("Value", style="white")
 
+        # Calculate throughput
+        throughput = summary["total"] / summary["total_time"] if summary["total_time"] > 0 else 0
+        speedup = summary["avg_latency"] / summary["avg_time_per_image"] if summary["avg_time_per_image"] > 0 else 1
+
         summary_table.add_row("🖼️  Total images", str(summary["total"]))
         summary_table.add_row("✅ Successful", f"[green]{summary['successful']}[/green]")
         summary_table.add_row("❌ Failed", f"[red]{summary['failed']}[/red]")
         summary_table.add_row("⏱️  Total time", f"[bold yellow]{summary['total_time']:.2f}s[/bold yellow]")
+        summary_table.add_row("🚀 Throughput", f"[bold magenta]{throughput:.2f} images/sec[/bold magenta]")
         summary_table.add_row("📊 Time per image (avg)", f"[bold cyan]{summary['avg_time_per_image']:.2f}s[/bold cyan]")
         summary_table.add_row("⚡ API latency (avg)", f"{summary['avg_latency']:.3f}s")
+        summary_table.add_row("⚙️  Parallel speedup", f"[bold green]{speedup:.1f}x[/bold green]")
         summary_table.add_row("💾 Results saved to", str(summary["output_path"]))
 
         console.print(summary_table)
-        console.print()
-
-        # Calculate and display speedup information
-        speedup = summary["avg_latency"] / summary["avg_time_per_image"] if summary["avg_time_per_image"] > 0 else 1
-        speedup_info = f"🚀 Parallel speedup: [bold green]{speedup:.1f}x faster[/bold green] than sequential processing"
-        console.print(speedup_info)
         console.print()
 
         console.print(Panel.fit("✓ Batch inference completed successfully!", style="bold green"))

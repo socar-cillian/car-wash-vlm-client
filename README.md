@@ -70,7 +70,7 @@ python main.py infer \
 ```
 
 **Options:**
-- `--api-url`: VLM API endpoint URL (default: http://vllm.mlops.socarcorp.co.kr/v1/chat/completions)
+- `--api-url`: VLM API endpoint URL (default: https://vllm-test.mlops.socarcorp.co.kr/v1/chat/completions)
 - `--model`: Model name (default: qwen25-vl-7b-instruct-awq)
 - `--max-tokens`: Maximum tokens to generate (default: 1000)
 - `--temperature`: Sampling temperature (default: 0.0)
