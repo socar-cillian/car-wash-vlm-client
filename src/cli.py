@@ -132,7 +132,6 @@ def batch_inference(
     input_csv: Annotated[Path | None, typer.Argument(help="Input CSV file with file_name and GT columns")] = None,
     images_dir: Annotated[Path | None, typer.Argument(help="Directory containing images")] = None,
     prompt: Annotated[Path | None, typer.Argument(help="Path to prompt file")] = None,
-    output: Annotated[Path | None, typer.Argument(help="Output CSV file path")] = None,
     api_url: Annotated[
         str | None,
         typer.Option(help="VLM API endpoint URL (overrides --internal)"),
@@ -164,10 +163,6 @@ def batch_inference(
         prompt_str = Prompt.ask("[cyan]📝 Prompt file path[/cyan]")
         prompt = Path(prompt_str)
 
-    if output is None:
-        output_str = Prompt.ask("[cyan]💾 Output CSV file path[/cyan]")
-        output = Path(output_str)
-
     # Ask for limit if not provided via CLI and in interactive mode
     if limit is None:
         limit_str = Prompt.ask("[cyan]🔢 Maximum number of images to process (press Enter for all)[/cyan]", default="")
@@ -197,6 +192,11 @@ def batch_inference(
     if not prompt.exists():
         console.print(f"[red]❌ Error: Prompt file not found: {prompt}[/red]")
         raise typer.Exit(1)
+
+    # Auto-generate output path: results/{prompt_name}_result.csv
+    prompt_name = prompt.stem  # e.g., "promptv4" from "promptv4.txt"
+    output = Path("results") / f"{prompt_name}_result.csv"
+    output.parent.mkdir(parents=True, exist_ok=True)
 
     # Determine API URL
     if api_url is None:
@@ -274,7 +274,6 @@ def simple_batch_inference(
     metadata_csv: Annotated[Path | None, typer.Argument(help="Metadata CSV file (optional, for joining)")] = None,
     images_dir: Annotated[Path | None, typer.Argument(help="Directory containing images")] = None,
     prompt: Annotated[Path | None, typer.Argument(help="Path to prompt file")] = None,
-    output: Annotated[Path | None, typer.Argument(help="Output CSV file path")] = None,
     api_url: Annotated[
         str | None,
         typer.Option(help="VLM API endpoint URL (overrides --internal)"),
@@ -307,10 +306,6 @@ def simple_batch_inference(
         prompt_str = Prompt.ask("[cyan]📝 Prompt file path[/cyan]")
         prompt = Path(prompt_str)
 
-    if output is None:
-        output_str = Prompt.ask("[cyan]💾 Output CSV file path[/cyan]")
-        output = Path(output_str)
-
     # Ask for limit if not provided via CLI and in interactive mode
     if limit is None and images_dir is not None:
         limit_str = Prompt.ask("[cyan]🔢 Maximum number of images to process (press Enter for all)[/cyan]", default="")
@@ -340,6 +335,11 @@ def simple_batch_inference(
     if metadata_csv is not None and not metadata_csv.exists():
         console.print(f"[red]❌ Error: Metadata CSV file not found: {metadata_csv}[/red]")
         raise typer.Exit(1)
+
+    # Auto-generate output path: results/{prompt_name}_result.csv
+    prompt_name = prompt.stem  # e.g., "promptv4" from "promptv4.txt"
+    output = Path("results") / f"{prompt_name}_result.csv"
+    output.parent.mkdir(parents=True, exist_ok=True)
 
     # Determine API URL
     if api_url is None:
