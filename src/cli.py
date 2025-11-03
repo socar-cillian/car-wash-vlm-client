@@ -10,7 +10,7 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from src.api import VLMClient
-from src.inference import run_batch_inference
+from src.inference import run_batch_inference, run_simple_batch_inference
 from src.prompts import generate_prompt_template, save_transformed_guideline, transform_guideline_csv
 
 
@@ -24,18 +24,41 @@ app = typer.Typer(
 )
 
 
+def _get_api_url(internal: bool, model: str) -> str:
+    """
+    Get the appropriate API URL based on whether running internally or externally.
+
+    Args:
+        internal: Whether running inside Kubernetes cluster
+        model: Model name to determine the service
+
+    Returns:
+        Full API URL for the VLM service
+    """
+    if internal:
+        # Internal Kubernetes service URL format: <service_name>.<namespace>.svc.cluster.local
+        # Default to qwen3-vl-8b for now
+        service_name = "vllm-test-qwen3-vl-8b-engine-service"
+        namespace = "vllm-test"
+        return f"http://{service_name}.{namespace}.svc.cluster.local:8000/v1/chat/completions"
+    else:
+        # External URL
+        return "https://vllm-test.mlops.socarcorp.co.kr/v1/chat/completions"
+
+
 @app.command("infer")
 def single_inference(
     image: Annotated[Path, typer.Argument(help="Path to image file")],
     prompt: Annotated[Path, typer.Argument(help="Path to prompt file")],
     api_url: Annotated[
-        str,
-        typer.Option(help="VLM API endpoint URL"),
-    ] = "https://vllm-test.mlops.socarcorp.co.kr/v1/chat/completions",
+        str | None,
+        typer.Option(help="VLM API endpoint URL (overrides --internal)"),
+    ] = None,
     model: Annotated[str, typer.Option(help="Model name")] = "qwen3-vl-8b-instruct",
     max_tokens: Annotated[int, typer.Option(help="Maximum tokens to generate")] = 1000,
     temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
     output: Annotated[Path | None, typer.Option(help="Output file path (optional)")] = None,
+    internal: Annotated[bool, typer.Option("--internal", help="Use internal Kubernetes service URL")] = False,
 ):
     """Run inference on a single image."""
     typer.echo("=" * 60)
@@ -54,6 +77,10 @@ def single_inference(
     # Load prompt
     with open(prompt, encoding="utf-8") as f:
         prompt_text = f.read()
+
+    # Determine API URL
+    if api_url is None:
+        api_url = _get_api_url(internal, model)
 
     # Initialize client
     typer.echo(f"API URL: {api_url}")
@@ -107,17 +134,18 @@ def batch_inference(
     prompt: Annotated[Path | None, typer.Argument(help="Path to prompt file")] = None,
     output: Annotated[Path | None, typer.Argument(help="Output CSV file path")] = None,
     api_url: Annotated[
-        str,
-        typer.Option(help="VLM API endpoint URL"),
-    ] = "https://vllm-test.mlops.socarcorp.co.kr/v1/chat/completions",
+        str | None,
+        typer.Option(help="VLM API endpoint URL (overrides --internal)"),
+    ] = None,
     model: Annotated[str, typer.Option(help="Model name")] = "qwen3-vl-8b-instruct",
     max_tokens: Annotated[int, typer.Option(help="Maximum tokens to generate")] = 1000,
     temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
     limit: Annotated[int | None, typer.Option(help="Maximum number of images to process (default: all)")] = None,
-    max_workers: Annotated[int, typer.Option(help="Number of parallel workers (default: 16)")] = 16,
+    max_workers: Annotated[int, typer.Option(help="Number of parallel workers (default: 4)")] = 4,
     enable_langfuse: Annotated[
         bool, typer.Option("--enable-langfuse/--no-langfuse", help="Enable Langfuse monitoring")
     ] = True,
+    internal: Annotated[bool, typer.Option("--internal", help="Use internal Kubernetes service URL")] = False,
 ):
     """Run batch inference on multiple images specified in CSV file."""
     console.print(Panel.fit("🚗 Batch Inference", style="bold magenta"))
@@ -140,6 +168,21 @@ def batch_inference(
         output_str = Prompt.ask("[cyan]💾 Output CSV file path[/cyan]")
         output = Path(output_str)
 
+    # Ask for limit if not provided via CLI and in interactive mode
+    if limit is None:
+        limit_str = Prompt.ask("[cyan]🔢 Maximum number of images to process (press Enter for all)[/cyan]", default="")
+        if limit_str and limit_str.strip():
+            try:
+                limit = int(limit_str)
+            except ValueError:
+                console.print("[yellow]⚠️  Invalid number, processing all images[/yellow]")
+                limit = None
+
+    # Ask for internal mode if api_url is not provided
+    if api_url is None and not internal:
+        internal_str = Prompt.ask("[cyan]🔧 Running inside Kubernetes cluster? (y/N)[/cyan]", default="N")
+        internal = internal_str.strip().lower() in ["y", "yes"]
+
     console.print()
 
     # Validate paths
@@ -154,6 +197,10 @@ def batch_inference(
     if not prompt.exists():
         console.print(f"[red]❌ Error: Prompt file not found: {prompt}[/red]")
         raise typer.Exit(1)
+
+    # Determine API URL
+    if api_url is None:
+        api_url = _get_api_url(internal, model)
 
     # Display configuration in a table
     config_table = Table(title="⚙️  Configuration", show_header=False, box=None)
@@ -187,6 +234,150 @@ def batch_inference(
             limit=limit,
             max_workers=max_workers,
             enable_langfuse=enable_langfuse,
+        )
+
+        # Display summary in a table
+        console.print()
+        summary_table = Table(title="📊 Summary", show_header=False, box=None)
+        summary_table.add_column("Key", style="cyan", width=25)
+        summary_table.add_column("Value", style="white")
+
+        # Calculate throughput
+        throughput = summary["total"] / summary["total_time"] if summary["total_time"] > 0 else 0
+        speedup = summary["avg_latency"] / summary["avg_time_per_image"] if summary["avg_time_per_image"] > 0 else 1
+
+        summary_table.add_row("🖼️  Total images", str(summary["total"]))
+        summary_table.add_row("✅ Successful", f"[green]{summary['successful']}[/green]")
+        summary_table.add_row("❌ Failed", f"[red]{summary['failed']}[/red]")
+        summary_table.add_row("⏱️  Total time", f"[bold yellow]{summary['total_time']:.2f}s[/bold yellow]")
+        summary_table.add_row("🚀 Throughput", f"[bold magenta]{throughput:.2f} images/sec[/bold magenta]")
+        summary_table.add_row("📊 Time per image (avg)", f"[bold cyan]{summary['avg_time_per_image']:.2f}s[/bold cyan]")
+        summary_table.add_row("⚡ API latency (avg)", f"{summary['avg_latency']:.3f}s")
+        summary_table.add_row("⚙️  Parallel speedup", f"[bold green]{speedup:.1f}x[/bold green]")
+        summary_table.add_row("💾 Results saved to", str(summary["output_path"]))
+
+        console.print(summary_table)
+        console.print()
+
+        console.print(Panel.fit("✓ Batch inference completed successfully!", style="bold green"))
+
+    except Exception as e:
+        console.print(f"[red]❌ Error: {e}[/red]")
+        import traceback
+
+        traceback.print_exc()
+        raise typer.Exit(1) from e
+
+
+@app.command("simple-batch-infer")
+def simple_batch_inference(
+    metadata_csv: Annotated[Path | None, typer.Argument(help="Metadata CSV file (optional, for joining)")] = None,
+    images_dir: Annotated[Path | None, typer.Argument(help="Directory containing images")] = None,
+    prompt: Annotated[Path | None, typer.Argument(help="Path to prompt file")] = None,
+    output: Annotated[Path | None, typer.Argument(help="Output CSV file path")] = None,
+    api_url: Annotated[
+        str | None,
+        typer.Option(help="VLM API endpoint URL (overrides --internal)"),
+    ] = None,
+    model: Annotated[str, typer.Option(help="Model name")] = "qwen3-vl-8b-instruct",
+    max_tokens: Annotated[int, typer.Option(help="Maximum tokens to generate")] = 1000,
+    temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
+    limit: Annotated[int | None, typer.Option(help="Maximum number of images to process (default: all)")] = None,
+    max_workers: Annotated[int, typer.Option(help="Number of parallel workers (default: 4)")] = 4,
+    enable_langfuse: Annotated[
+        bool, typer.Option("--enable-langfuse/--no-langfuse", help="Enable Langfuse monitoring")
+    ] = True,
+    internal: Annotated[bool, typer.Option("--internal", help="Use internal Kubernetes service URL")] = False,
+):
+    """Run batch inference on all images in a directory, optionally joining with metadata CSV."""
+    console.print(Panel.fit("🚗 Simple Batch Inference", style="bold magenta"))
+
+    # Interactive input if arguments not provided
+    if metadata_csv is None:
+        console.print()
+        metadata_csv_str = Prompt.ask("[cyan]📄 Metadata CSV file path (press Enter to skip)[/cyan]", default="")
+        if metadata_csv_str and metadata_csv_str.strip():
+            metadata_csv = Path(metadata_csv_str)
+
+    if images_dir is None:
+        images_dir_str = Prompt.ask("[cyan]📁 Images directory path[/cyan]")
+        images_dir = Path(images_dir_str)
+
+    if prompt is None:
+        prompt_str = Prompt.ask("[cyan]📝 Prompt file path[/cyan]")
+        prompt = Path(prompt_str)
+
+    if output is None:
+        output_str = Prompt.ask("[cyan]💾 Output CSV file path[/cyan]")
+        output = Path(output_str)
+
+    # Ask for limit if not provided via CLI and in interactive mode
+    if limit is None and images_dir is not None:
+        limit_str = Prompt.ask("[cyan]🔢 Maximum number of images to process (press Enter for all)[/cyan]", default="")
+        if limit_str and limit_str.strip():
+            try:
+                limit = int(limit_str)
+            except ValueError:
+                console.print("[yellow]⚠️  Invalid number, processing all images[/yellow]")
+                limit = None
+
+    # Ask for internal mode if api_url is not provided
+    if api_url is None and not internal:
+        internal_str = Prompt.ask("[cyan]🔧 Running inside Kubernetes cluster? (y/N)[/cyan]", default="N")
+        internal = internal_str.strip().lower() in ["y", "yes"]
+
+    console.print()
+
+    # Validate paths
+    if not images_dir.exists():
+        console.print(f"[red]❌ Error: Images directory not found: {images_dir}[/red]")
+        raise typer.Exit(1)
+
+    if not prompt.exists():
+        console.print(f"[red]❌ Error: Prompt file not found: {prompt}[/red]")
+        raise typer.Exit(1)
+
+    if metadata_csv is not None and not metadata_csv.exists():
+        console.print(f"[red]❌ Error: Metadata CSV file not found: {metadata_csv}[/red]")
+        raise typer.Exit(1)
+
+    # Determine API URL
+    if api_url is None:
+        api_url = _get_api_url(internal, model)
+
+    # Display configuration in a table
+    config_table = Table(title="⚙️  Configuration", show_header=False, box=None)
+    config_table.add_column("Key", style="cyan", width=20)
+    config_table.add_column("Value", style="white")
+
+    if metadata_csv:
+        config_table.add_row("📄 Metadata CSV", str(metadata_csv))
+    config_table.add_row("📁 Images directory", str(images_dir))
+    config_table.add_row("📝 Prompt file", str(prompt))
+    config_table.add_row("💾 Output CSV", str(output))
+    config_table.add_row("🌐 API URL", api_url)
+    config_table.add_row("🤖 Model", model)
+    config_table.add_row("⚡ Workers", str(max_workers))
+    config_table.add_row("📊 Langfuse", "[green]Enabled[/green]" if enable_langfuse else "[red]Disabled[/red]")
+    if limit:
+        config_table.add_row("🔢 Limit", str(limit))
+
+    console.print(config_table)
+    console.print()
+
+    try:
+        summary = run_simple_batch_inference(
+            images_dir=images_dir,
+            prompt_path=prompt,
+            output_csv=output,
+            api_url=api_url,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            limit=limit,
+            max_workers=max_workers,
+            enable_langfuse=enable_langfuse,
+            metadata_csv=metadata_csv,
         )
 
         # Display summary in a table

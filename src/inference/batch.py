@@ -234,7 +234,7 @@ def process_image(
         }
 
 
-def create_csv_row(image_path: Path, inference_result: dict, model_name: str) -> dict:
+def create_csv_row(image_path: Path, inference_result: dict, model_name: str, prompt_version: str = "") -> dict:
     """
     Create a CSV row from inference result.
 
@@ -242,6 +242,7 @@ def create_csv_row(image_path: Path, inference_result: dict, model_name: str) ->
         image_path: Path to image file
         inference_result: Inference result dictionary
         model_name: Name of the model used
+        prompt_version: Name of the prompt file/version used
 
     Returns:
         Dictionary representing a CSV row
@@ -249,6 +250,61 @@ def create_csv_row(image_path: Path, inference_result: dict, model_name: str) ->
     row = {
         "image_name": image_path.name,
         "model": model_name,
+        "prompt_version": prompt_version,
+        "latency_seconds": f"{inference_result['latency']:.3f}",
+        "success": inference_result["success"],
+    }
+
+    if not inference_result["success"]:
+        row["error"] = inference_result.get("error", "unknown_error")
+        row["classification"] = ""
+        row["contamination_types"] = ""
+        row["contamination_parts"] = ""
+        row["raw_response"] = ""
+        return row
+
+    result = inference_result.get("result", {})
+
+    # Add classification
+    row["classification"] = result.get("classification", "")
+
+    # Add contamination types (convert list to comma-separated string)
+    contamination_types = result.get("contamination_types", [])
+    if isinstance(contamination_types, list):
+        row["contamination_types"] = ", ".join(contamination_types) if contamination_types else ""
+    else:
+        row["contamination_types"] = str(contamination_types)
+
+    # Add contamination parts (convert list to comma-separated string)
+    contamination_parts = result.get("contamination_parts", [])
+    if isinstance(contamination_parts, list):
+        row["contamination_parts"] = ", ".join(contamination_parts) if contamination_parts else ""
+    else:
+        row["contamination_parts"] = str(contamination_parts)
+
+    # Add raw response for debugging (optional, can be removed if not needed)
+    row["raw_response"] = str(result)
+
+    return row
+
+
+def create_csv_row_legacy(image_path: Path, inference_result: dict, model_name: str, prompt_version: str = "") -> dict:
+    """
+    Create a CSV row from inference result (legacy format for area-based inference).
+
+    Args:
+        image_path: Path to image file
+        inference_result: Inference result dictionary
+        model_name: Name of the model used
+        prompt_version: Name of the prompt file/version used
+
+    Returns:
+        Dictionary representing a CSV row
+    """
+    row = {
+        "image_name": image_path.name,
+        "model": model_name,
+        "prompt_version": prompt_version,
         "latency_seconds": f"{inference_result['latency']:.3f}",
         "success": inference_result["success"],
     }
@@ -316,6 +372,248 @@ def load_ground_truth(gt_csv_path: Path) -> dict[str, dict]:
     return gt_data
 
 
+def run_simple_batch_inference(
+    images_dir: Path,
+    prompt_path: Path,
+    output_csv: Path,
+    api_url: str,
+    model: str,
+    max_tokens: int,
+    temperature: float,
+    limit: int | None = None,
+    max_workers: int = 4,
+    enable_langfuse: bool = True,
+    metadata_csv: Path | None = None,
+) -> dict:
+    """
+    Run batch inference on all images in a directory with parallel processing.
+
+    Args:
+        images_dir: Directory containing images
+        prompt_path: Path to prompt file
+        output_csv: Output CSV file path
+        api_url: VLM API endpoint URL
+        model: Model name
+        max_tokens: Maximum tokens to generate
+        temperature: Sampling temperature
+        limit: Maximum number of images to process (default: all)
+        max_workers: Number of parallel workers (default: 4)
+        enable_langfuse: Whether to enable Langfuse monitoring (default: True)
+        metadata_csv: Optional metadata CSV file to join with results
+
+    Returns:
+        Dictionary with summary statistics
+    """
+    # Initialize Langfuse monitor
+    langfuse_monitor = get_langfuse_monitor(enabled=enable_langfuse)
+
+    # Load prompt
+    prompt = load_prompt(prompt_path)
+
+    # Initialize client with langfuse monitoring
+    client = VLMClient(api_url=api_url, model=model, langfuse_monitor=langfuse_monitor)
+
+    # Extract prompt version from filename
+    prompt_version = prompt_path.stem
+
+    # Load metadata if provided
+    metadata_dict = {}
+    metadata_columns = []
+    if metadata_csv is not None:
+        print(f"Loading metadata from {metadata_csv}")
+        with open(metadata_csv, encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            metadata_columns = reader.fieldnames or []
+            for row in reader:
+                # Try to get file_name from different possible columns
+                file_name = row.get("file_name", "")
+                if not file_name:
+                    # If file_name is not present, try to extract from file_url
+                    file_url = row.get("file_url", "")
+                    if file_url:
+                        # Extract filename from URL (e.g., "https://example.com/path/file.jpg" -> "file.jpg")
+                        file_name = file_url.split("/")[-1]
+
+                if file_name:
+                    metadata_dict[file_name] = dict(row)
+        print(f"Loaded metadata for {len(metadata_dict)} files")
+
+    # Scan images directory for image files
+    print(f"Scanning images directory: {images_dir}")
+    image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
+    image_paths = [p for p in images_dir.iterdir() if p.is_file() and p.suffix.lower() in image_extensions]
+
+    if not image_paths:
+        raise ValueError(f"No image files found in {images_dir}")
+
+    print(f"Found {len(image_paths)} images")
+
+    # Apply limit if specified
+    if limit is not None and limit > 0:
+        image_paths = image_paths[:limit]
+        print(f"Processing first {len(image_paths)} images (limit applied)")
+
+    print(f"Starting parallel inference with {max_workers} workers...")
+    print()
+
+    # Start timer for total processing time
+    total_start_time = time.time()
+
+    # Process images in parallel
+    results = []
+    futures_to_path = {}
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        for image_path in image_paths:
+            future = executor.submit(
+                process_image,
+                client,
+                image_path,
+                prompt,
+                max_tokens,
+                temperature,
+            )
+            futures_to_path[future] = image_path
+
+        # Process completed tasks with progress bar
+        with tqdm(total=len(futures_to_path), desc="Processing images", unit="img") as pbar:
+            for future in as_completed(futures_to_path):
+                image_path = futures_to_path[future]
+
+                try:
+                    inference_result = future.result()
+                    row = create_csv_row(image_path, inference_result, model, prompt_version)
+
+                    # Add metadata if available
+                    if image_path.name in metadata_dict:
+                        for col in metadata_columns:
+                            if col not in row:
+                                row[col] = metadata_dict[image_path.name].get(col, "")
+
+                    results.append(row)
+
+                    # Update progress bar description
+                    if inference_result["success"]:
+                        pbar.set_postfix_str(f"✓ {image_path.name} ({inference_result['latency']:.2f}s)")
+                    else:
+                        pbar.set_postfix_str(f"✗ {image_path.name}")
+
+                except Exception as e:
+                    # Handle unexpected errors
+                    row = {
+                        "image_name": image_path.name,
+                        "model": model,
+                        "prompt_version": prompt_version,
+                        "latency_seconds": "0.000",
+                        "success": False,
+                        "error": str(e),
+                        "classification": "",
+                        "contamination_types": "",
+                        "contamination_parts": "",
+                        "raw_response": "",
+                    }
+
+                    # Add metadata if available
+                    if image_path.name in metadata_dict:
+                        for col in metadata_columns:
+                            if col not in row:
+                                row[col] = metadata_dict[image_path.name].get(col, "")
+
+                    results.append(row)
+                    pbar.set_postfix_str(f"✗ {image_path.name} (error)")
+
+                pbar.update(1)
+
+    # Save results
+    # Start with metadata columns if available
+    fieldnames = list(metadata_columns) if metadata_columns else []
+
+    # Ensure image_name is in fieldnames
+    if "image_name" not in fieldnames:
+        fieldnames.insert(0, "image_name")
+
+    # Add inference result columns
+    inference_columns = [
+        "model",
+        "prompt_version",
+        "latency_seconds",
+        "success",
+        "error",
+        "classification",
+        "contamination_types",
+        "contamination_parts",
+        "raw_response",
+    ]
+    for col in inference_columns:
+        if col not in fieldnames:
+            fieldnames.append(col)
+
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_csv, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(results)
+
+    # Calculate total processing time
+    total_elapsed_time = time.time() - total_start_time
+
+    # Calculate summary
+    successful = sum(1 for r in results if r["success"])
+    failed = len(results) - successful
+    avg_latency = sum(float(r["latency_seconds"]) for r in results) / len(results)
+
+    # Calculate per-image time (wall clock time divided by number of images)
+    avg_time_per_image = total_elapsed_time / len(results) if results else 0
+    speedup = avg_latency / avg_time_per_image if avg_time_per_image > 0 else 1
+
+    # Log summary to Langfuse using trace
+    if langfuse_monitor.enabled:
+        trace = langfuse_monitor.start_trace_span(
+            name="simple_batch_inference",
+            input_data={
+                "images_dir": str(images_dir),
+                "model": model,
+                "max_workers": max_workers,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            },
+            metadata={
+                "total_images": len(results),
+                "successful": successful,
+                "failed": failed,
+                "success_rate": successful / len(results) if results else 0,
+            },
+        )
+        if trace:
+            with trace as span:
+                span.update(
+                    output={
+                        "total_images": len(results),
+                        "successful": successful,
+                        "failed": failed,
+                        "avg_latency": avg_latency,
+                        "total_time": total_elapsed_time,
+                        "avg_time_per_image": avg_time_per_image,
+                        "speedup": speedup,
+                        "output_path": str(output_csv),
+                    }
+                )
+
+        # Flush all events to Langfuse
+        langfuse_monitor.flush()
+
+    return {
+        "total": len(results),
+        "successful": successful,
+        "failed": failed,
+        "avg_latency": avg_latency,
+        "total_time": total_elapsed_time,
+        "avg_time_per_image": avg_time_per_image,
+        "output_path": output_csv,
+    }
+
+
 def run_batch_inference(
     input_csv: Path,
     images_dir: Path,
@@ -326,7 +624,7 @@ def run_batch_inference(
     max_tokens: int,
     temperature: float,
     limit: int | None = None,
-    max_workers: int = 16,
+    max_workers: int = 4,
     enable_langfuse: bool = True,
 ) -> dict:
     """
@@ -342,7 +640,7 @@ def run_batch_inference(
         max_tokens: Maximum tokens to generate
         temperature: Sampling temperature
         limit: Maximum number of images to process (default: all)
-        max_workers: Number of parallel workers (default: 16)
+        max_workers: Number of parallel workers (default: 4)
         enable_langfuse: Whether to enable Langfuse monitoring (default: True)
 
     Returns:
@@ -357,21 +655,21 @@ def run_batch_inference(
     # Initialize client with langfuse monitoring
     client = VLMClient(api_url=api_url, model=model, langfuse_monitor=langfuse_monitor)
 
-    # Load input CSV with ground truth data
+    # Extract prompt version from filename
+    prompt_version = prompt_path.stem
+
+    # Load input CSV with all columns
     print(f"Loading input CSV from {input_csv}")
     image_data = []
+    input_csv_columns = []
     with open(input_csv, encoding="utf-8") as f:
         reader = csv.DictReader(f)
+        input_csv_columns = reader.fieldnames or []
         for row in reader:
             file_name = row.get("file_name", "")
             if file_name:
-                image_data.append(
-                    {
-                        "file_name": file_name,
-                        "gt_contamination_area": row.get("gt_contamination_area", ""),
-                        "gt_contamination_type": row.get("gt_contamination_type", ""),
-                    }
-                )
+                # Store all columns from the original CSV
+                image_data.append(dict(row))
 
     if not image_data:
         raise ValueError(f"No valid entries found in {input_csv}")
@@ -402,10 +700,9 @@ def run_batch_inference(
             # Check if image exists before submitting
             if not image_path.exists():
                 row = {
-                    "image_name": file_name,
-                    "gt_contamination_area": data["gt_contamination_area"],
-                    "gt_contamination_type": data["gt_contamination_type"],
+                    **data,  # Include all original CSV columns
                     "model": model,
+                    "prompt_version": prompt_version,
                     "latency_seconds": "0.000",
                     "success": False,
                     "error": "file_not_found",
@@ -436,11 +733,12 @@ def run_batch_inference(
 
                 try:
                     inference_result = future.result()
-                    row = create_csv_row(image_path, inference_result, model)
+                    row = create_csv_row_legacy(image_path, inference_result, model, prompt_version)
 
-                    # Add ground truth columns from CSV
-                    row["gt_contamination_area"] = data["gt_contamination_area"]
-                    row["gt_contamination_type"] = data["gt_contamination_type"]
+                    # Add all original CSV columns
+                    for col in input_csv_columns:
+                        if col not in row:
+                            row[col] = data.get(col, "")
 
                     results.append(row)
 
@@ -453,10 +751,9 @@ def run_batch_inference(
                 except Exception as e:
                     # Handle unexpected errors
                     row = {
-                        "image_name": image_path.name,
-                        "gt_contamination_area": data["gt_contamination_area"],
-                        "gt_contamination_type": data["gt_contamination_type"],
+                        **data,  # Include all original CSV columns
                         "model": model,
+                        "prompt_version": prompt_version,
                         "latency_seconds": "0.000",
                         "success": False,
                         "error": str(e),
@@ -470,17 +767,24 @@ def run_batch_inference(
 
                 pbar.update(1)
 
-    # Save results
-    fieldnames = [
-        "image_name",
-        "gt_contamination_area",
-        "gt_contamination_type",
+    # Save results - combine original CSV columns with inference results
+    # Start with original CSV columns
+    fieldnames = list(input_csv_columns)
+
+    # Add inference result columns
+    inference_columns = [
         "model",
+        "prompt_version",
         "latency_seconds",
         "success",
         "error",
         "image_type",
     ]
+    for col in inference_columns:
+        if col not in fieldnames:
+            fieldnames.append(col)
+
+    # Add area-specific columns
     for area in ALL_AREAS:
         fieldnames.append(f"{area}_contamination_type")
         fieldnames.append(f"{area}_severity")

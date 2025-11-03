@@ -13,8 +13,55 @@ def load_inference_results(csv_path: Path) -> pd.DataFrame:
     return df
 
 
+def display_classification_results(row: pd.Series) -> None:
+    """Display classification and contamination results (new format)."""
+    classification = row.get("classification", "N/A")
+    contamination_types = row.get("contamination_types", "")
+    contamination_parts = row.get("contamination_parts", "")
+
+    # Color code based on classification
+    if classification == "Dirty":
+        color = "🔴"
+        status_color = "red"
+    elif classification == "Normal":
+        color = "🟢"
+        status_color = "green"
+    else:
+        color = "⚪"
+        status_color = "gray"
+
+    # Display classification with colored badge
+    st.markdown(f"### {color} 분류: :{status_color}[{classification}]")
+
+    # Display contamination details if dirty
+    if classification == "Dirty" and (contamination_types or contamination_parts):
+        st.markdown("#### 오염 상세 정보")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**오염 유형:**")
+            if contamination_types and contamination_types != "":
+                types_list = [t.strip() for t in str(contamination_types).split(",")]
+                for ct_type in types_list:
+                    st.markdown(f"- `{ct_type}`")
+            else:
+                st.markdown("- *(없음)*")
+
+        with col2:
+            st.markdown("**오염 부위:**")
+            if contamination_parts and contamination_parts != "":
+                parts_list = [p.strip() for p in str(contamination_parts).split(",")]
+                for part in parts_list:
+                    st.markdown(f"- `{part}`")
+            else:
+                st.markdown("- *(없음)*")
+    elif classification == "Normal":
+        st.success("✓ 차량이 깨끗한 상태입니다.")
+
+
 def display_area_results(row: pd.Series, areas: list[str]) -> None:
-    """Display contamination results for each area."""
+    """Display contamination results for each area (legacy format)."""
     cols = st.columns(len(areas))
 
     for idx, area in enumerate(areas):
@@ -104,17 +151,17 @@ def main():
         success_count = df["success"].sum() if "success" in df.columns else 0
         st.metric("성공", success_count)
     with col3:
-        if "image_type" in df.columns:
-            interior_count = (df["image_type"] == "내부").sum()
-            st.metric("내부", interior_count)
+        if "classification" in df.columns:
+            normal_count = (df["classification"] == "Normal").sum()
+            st.metric("Normal", normal_count, delta=None, delta_color="normal")
         else:
-            st.metric("내부", "N/A")
+            st.metric("Normal", "N/A")
     with col4:
-        if "image_type" in df.columns:
-            exterior_count = (df["image_type"] == "외부").sum()
-            st.metric("외부", exterior_count)
+        if "classification" in df.columns:
+            dirty_count = (df["classification"] == "Dirty").sum()
+            st.metric("Dirty", dirty_count, delta=None, delta_color="inverse")
         else:
-            st.metric("외부", "N/A")
+            st.metric("Dirty", "N/A")
 
     st.markdown("---")
 
@@ -123,32 +170,50 @@ def main():
     filter_col1, filter_col2, filter_col3 = st.columns(3)
 
     with filter_col1:
-        image_type_filter = st.multiselect(
-            "이미지 타입",
-            options=df["image_type"].unique() if "image_type" in df.columns else [],
-            default=df["image_type"].unique() if "image_type" in df.columns else [],
+        classification_filter = st.multiselect(
+            "분류",
+            options=df["classification"].unique() if "classification" in df.columns else [],
+            default=df["classification"].unique() if "classification" in df.columns else [],
         )
 
     with filter_col2:
-        gt_area_filter = st.multiselect(
-            "GT 영역",
-            options=df["gt_contamination_area"].unique() if "gt_contamination_area" in df.columns else [],
-            default=df["gt_contamination_area"].unique() if "gt_contamination_area" in df.columns else [],
-        )
+        success_filter = st.selectbox("추론 성공 여부", options=["전체", "성공", "실패"], index=0)
 
     with filter_col3:
-        success_filter = st.selectbox("추론 성공 여부", options=["전체", "성공", "실패"], index=0)
+        # Add contamination type filter (for Dirty images)
+        all_contamination_types = set()
+        if "contamination_types" in df.columns:
+            for types_str in df["contamination_types"].dropna():
+                if types_str and types_str != "":
+                    types_list = [t.strip() for t in str(types_str).split(",")]
+                    all_contamination_types.update(types_list)
+
+        contamination_type_filter = st.multiselect(
+            "오염 유형",
+            options=sorted(all_contamination_types),
+            default=[],
+        )
 
     # Apply filters
     filtered_df = df.copy()
-    if image_type_filter and "image_type" in df.columns:
-        filtered_df = filtered_df[filtered_df["image_type"].isin(image_type_filter)]
-    if gt_area_filter and "gt_contamination_area" in df.columns:
-        filtered_df = filtered_df[filtered_df["gt_contamination_area"].isin(gt_area_filter)]
+
+    if classification_filter and "classification" in df.columns:
+        filtered_df = filtered_df[filtered_df["classification"].isin(classification_filter)]
+
     if success_filter == "성공":
         filtered_df = filtered_df[filtered_df["success"]]
     elif success_filter == "실패":
         filtered_df = filtered_df[~filtered_df["success"]]
+
+    if contamination_type_filter and "contamination_types" in df.columns:
+        # Filter rows that contain any of the selected contamination types
+        def contains_any_type(types_str):
+            if pd.isna(types_str) or types_str == "":
+                return False
+            types_list = [t.strip() for t in str(types_str).split(",")]
+            return any(ct_type in types_list for ct_type in contamination_type_filter)
+
+        filtered_df = filtered_df[filtered_df["contamination_types"].apply(contains_any_type)]
 
     st.info(f"필터링된 결과: {len(filtered_df)} / {len(df)} 이미지")
 
@@ -197,34 +262,45 @@ def main():
             st.markdown(f"**처리 시간**: {row.get('latency_seconds', 'N/A'):.3f}초")
         with info_col2:
             st.markdown(f"**추론 성공**: {'✅' if row.get('success', False) else '❌'}")
-            st.markdown(f"**이미지 타입**: {row.get('image_type', 'N/A')}")
-
-        # Ground truth
-        st.markdown("### Ground Truth")
-        gt_col1, gt_col2 = st.columns(2)
-        with gt_col1:
-            st.markdown(f"**영역**: {row.get('gt_contamination_area', 'N/A')}")
-        with gt_col2:
-            st.markdown(f"**오염 타입**: {row.get('gt_contamination_type', 'N/A')}")
 
         st.markdown("---")
 
-        # Area-specific results
-        st.markdown("### 영역별 상세 결과")
+        # Check if we have new format (classification) or legacy format (image_type + areas)
+        has_classification = "classification" in row and pd.notna(row.get("classification"))
+        has_legacy_format = "image_type" in row and pd.notna(row.get("image_type"))
 
-        # Determine which areas to show based on image type
-        image_type = row.get("image_type", "")
+        if has_classification:
+            # New format: display classification results
+            display_classification_results(row)
+        elif has_legacy_format:
+            # Legacy format: display area-based results
+            st.markdown("### 영역별 상세 결과")
 
-        if image_type == "내부":
-            areas = ["운전석", "조수석", "컵홀더", "뒷좌석"]
-            st.markdown("**내부 영역**")
-            display_area_results(row, areas)
-        elif image_type == "외부":
-            areas = ["전면", "조수석_방향", "운전석_방향", "후면"]
-            st.markdown("**외부 영역**")
-            display_area_results(row, areas)
+            # Ground truth (only in legacy format)
+            if "gt_contamination_area" in row or "gt_contamination_type" in row:
+                st.markdown("**Ground Truth**")
+                gt_col1, gt_col2 = st.columns(2)
+                with gt_col1:
+                    st.markdown(f"영역: {row.get('gt_contamination_area', 'N/A')}")
+                with gt_col2:
+                    st.markdown(f"오염 타입: {row.get('gt_contamination_type', 'N/A')}")
+                st.markdown("---")
+
+            # Determine which areas to show based on image type
+            image_type = row.get("image_type", "")
+
+            if image_type == "내부":
+                areas = ["운전석", "조수석", "컵홀더", "뒷좌석"]
+                st.markdown("**내부 영역**")
+                display_area_results(row, areas)
+            elif image_type == "외부":
+                areas = ["전면", "조수석_방향", "운전석_방향", "후면"]
+                st.markdown("**외부 영역**")
+                display_area_results(row, areas)
+            else:
+                st.info("이미지 타입이 지정되지 않았거나 관련없음으로 분류되었습니다.")
         else:
-            st.info("이미지 타입이 지정되지 않았거나 관련없음으로 분류되었습니다.")
+            st.warning("결과 형식을 인식할 수 없습니다.")
 
     st.markdown("---")
 

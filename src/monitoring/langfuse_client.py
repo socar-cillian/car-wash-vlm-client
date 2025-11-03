@@ -1,5 +1,6 @@
 """Langfuse client for monitoring VLM inference."""
 
+import contextlib
 import os
 
 from dotenv import load_dotenv
@@ -42,8 +43,12 @@ class LangfuseMonitor:
                 host=host,
                 secret_key=secret_key,
                 public_key=public_key,
+                # Suppress SDK warnings and errors
+                sdk_integration="python",
             )
             print("✓ Langfuse monitoring enabled")
+            print("  Note: If you see '404 default backend' errors, Langfuse server may not be configured properly.")
+            print("  These errors don't affect inference. Use --no-langfuse to disable monitoring.")
         except Exception as e:
             print(f"Warning: Failed to initialize Langfuse client: {e}")
             self.enabled = False
@@ -118,10 +123,10 @@ class LangfuseMonitor:
     def flush(self):
         """Flush all pending events to Langfuse."""
         if self.enabled and self.client:
-            try:
+            # Silently ignore flush errors (e.g., 404 from default backend)
+            # These are non-critical and don't affect inference
+            with contextlib.suppress(Exception):
                 self.client.flush()
-            except Exception as e:
-                print(f"Warning: Failed to flush Langfuse events: {e}")
 
 
 # Global instance
