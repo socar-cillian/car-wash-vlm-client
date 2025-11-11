@@ -311,7 +311,12 @@ def create_csv_row(image_path: Path, inference_result: dict, model_name: str, pr
             severity_levels.append(severity)
 
         # Check if any contamination is not in guideline
-        if not area.get("is_in_guideline", True):
+        # Validate area name against guideline areas (override VLM's is_in_guideline if needed)
+        if area_name and area_name not in ALL_AREAS:
+            # Area name not in guideline - mark as non-guideline regardless of VLM response
+            has_non_guideline = True
+        elif not area.get("is_in_guideline", True):
+            # VLM explicitly marked as not in guideline
             has_non_guideline = True
 
     # Convert sets to comma-separated strings
