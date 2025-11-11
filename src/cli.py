@@ -10,8 +10,9 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from src.api import VLMClient
-from src.inference import run_batch_inference, run_simple_batch_inference
-from src.prompts import generate_prompt_template, save_transformed_guideline, transform_guideline_csv
+from src.inference import run_batch_inference
+from src.prompts import generate_prompt_template, parse_guideline_v2
+from src.utils import filter_unknown_contaminations
 
 
 console = Console()
@@ -90,6 +91,19 @@ def single_inference(
 
     client = VLMClient(api_url=api_url, model=model)
 
+    # Check server health
+    typer.echo("Checking server health...")
+    health_result = client.check_health(timeout=10)
+
+    if not health_result["healthy"]:
+        typer.echo(f"✗ Server health check failed: {health_result['error']}", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"✓ Server is healthy (response time: {health_result['response_time']:.2f}s)")
+    if health_result.get("endpoint"):
+        typer.echo(f"  Health endpoint: {health_result['endpoint']}")
+    typer.echo()
+
     # Run inference
     typer.echo("Running inference...")
     try:
@@ -141,9 +155,6 @@ def batch_inference(
     temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
     limit: Annotated[int | None, typer.Option(help="Maximum number of images to process (default: all)")] = None,
     max_workers: Annotated[int, typer.Option(help="Number of parallel workers (default: 4)")] = 4,
-    enable_langfuse: Annotated[
-        bool, typer.Option("--enable-langfuse/--no-langfuse", help="Enable Langfuse monitoring")
-    ] = True,
     internal: Annotated[bool, typer.Option("--internal", help="Use internal Kubernetes service URL")] = False,
 ):
     """Run batch inference on multiple images specified in CSV file."""
@@ -214,7 +225,6 @@ def batch_inference(
     config_table.add_row("🌐 API URL", api_url)
     config_table.add_row("🤖 Model", model)
     config_table.add_row("⚡ Workers", str(max_workers))
-    config_table.add_row("📊 Langfuse", "[green]Enabled[/green]" if enable_langfuse else "[red]Disabled[/red]")
     if limit:
         config_table.add_row("🔢 Limit", str(limit))
 
@@ -233,7 +243,6 @@ def batch_inference(
             temperature=temperature,
             limit=limit,
             max_workers=max_workers,
-            enable_langfuse=enable_langfuse,
         )
 
         # Display summary in a table
@@ -259,151 +268,58 @@ def batch_inference(
         console.print(summary_table)
         console.print()
 
-        console.print(Panel.fit("✓ Batch inference completed successfully!", style="bold green"))
+        # Show appropriate message based on results
+        if summary["successful"] == 0 and summary["failed"] > 0:
+            console.print(Panel.fit("❌ All inference requests failed!", style="bold red"))
+            console.print()
 
-    except Exception as e:
-        console.print(f"[red]❌ Error: {e}[/red]")
-        import traceback
+            # Analyze errors to provide helpful diagnostics
+            import pandas as pd
 
-        traceback.print_exc()
-        raise typer.Exit(1) from e
+            results_df = pd.read_csv(summary["output_path"])
+            error_samples = results_df[~results_df["success"]]["error"].head(3).tolist()
 
+            # Check for common error patterns
+            has_403_error = any("403" in str(err) for err in error_samples if err)
+            has_500_error = any("500" in str(err) for err in error_samples if err)
 
-@app.command("simple-batch-infer")
-def simple_batch_inference(
-    metadata_csv: Annotated[Path | None, typer.Argument(help="Metadata CSV file (optional, for joining)")] = None,
-    images_dir: Annotated[Path | None, typer.Argument(help="Directory containing images")] = None,
-    prompt: Annotated[Path | None, typer.Argument(help="Path to prompt file")] = None,
-    api_url: Annotated[
-        str | None,
-        typer.Option(help="VLM API endpoint URL (overrides --internal)"),
-    ] = None,
-    model: Annotated[str, typer.Option(help="Model name")] = "qwen3-vl-8b-instruct",
-    max_tokens: Annotated[int, typer.Option(help="Maximum tokens to generate")] = 1000,
-    temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
-    limit: Annotated[int | None, typer.Option(help="Maximum number of images to process (default: all)")] = None,
-    max_workers: Annotated[int, typer.Option(help="Number of parallel workers (default: 4)")] = 4,
-    enable_langfuse: Annotated[
-        bool, typer.Option("--enable-langfuse/--no-langfuse", help="Enable Langfuse monitoring")
-    ] = True,
-    internal: Annotated[bool, typer.Option("--internal", help="Use internal Kubernetes service URL")] = False,
-):
-    """Run batch inference on all images in a directory, optionally joining with metadata CSV."""
-    console.print(Panel.fit("🚗 Simple Batch Inference", style="bold magenta"))
+            if has_403_error:
+                console.print("[red]❌ Server cannot access image URLs (403 Forbidden)[/red]")
+                console.print()
+                console.print("[yellow]Possible solutions:[/yellow]")
+                console.print("  • Check S3 bucket permissions - server may need access")
+                console.print("  • Make S3 bucket public or add server IP to allowlist")
+                console.print("  • Use signed URLs if images are in private bucket")
+                console.print("  • Download images locally and use local paths instead")
+            elif has_500_error:
+                console.print("[red]Server returned 500 errors. Common issues:[/red]")
+                console.print("  • Server out of memory or overloaded")
+                console.print("  • Invalid image formats")
+                console.print("  • Check server logs for details")
+            else:
+                console.print("[red]All images failed to process. Common issues:[/red]")
+                console.print("  • Invalid image URLs or formats")
+                console.print("  • Network connectivity issues")
+                console.print("  • Server configuration problems")
 
-    # Interactive input if arguments not provided
-    if metadata_csv is None:
-        console.print()
-        metadata_csv_str = Prompt.ask("[cyan]📄 Metadata CSV file path (press Enter to skip)[/cyan]", default="")
-        if metadata_csv_str and metadata_csv_str.strip():
-            metadata_csv = Path(metadata_csv_str)
-
-    if images_dir is None:
-        images_dir_str = Prompt.ask("[cyan]📁 Images directory path[/cyan]")
-        images_dir = Path(images_dir_str)
-
-    if prompt is None:
-        prompt_str = Prompt.ask("[cyan]📝 Prompt file path[/cyan]")
-        prompt = Path(prompt_str)
-
-    # Ask for limit if not provided via CLI and in interactive mode
-    if limit is None and images_dir is not None:
-        limit_str = Prompt.ask("[cyan]🔢 Maximum number of images to process (press Enter for all)[/cyan]", default="")
-        if limit_str and limit_str.strip():
-            try:
-                limit = int(limit_str)
-            except ValueError:
-                console.print("[yellow]⚠️  Invalid number, processing all images[/yellow]")
-                limit = None
-
-    # Ask for internal mode if api_url is not provided
-    if api_url is None and not internal:
-        internal_str = Prompt.ask("[cyan]🔧 Running inside Kubernetes cluster? (y/N)[/cyan]", default="N")
-        internal = internal_str.strip().lower() in ["y", "yes"]
-
-    console.print()
-
-    # Validate paths
-    if not images_dir.exists():
-        console.print(f"[red]❌ Error: Images directory not found: {images_dir}[/red]")
-        raise typer.Exit(1)
-
-    if not prompt.exists():
-        console.print(f"[red]❌ Error: Prompt file not found: {prompt}[/red]")
-        raise typer.Exit(1)
-
-    if metadata_csv is not None and not metadata_csv.exists():
-        console.print(f"[red]❌ Error: Metadata CSV file not found: {metadata_csv}[/red]")
-        raise typer.Exit(1)
-
-    # Auto-generate output path: results/{prompt_name}_result.csv
-    prompt_name = prompt.stem  # e.g., "promptv4" from "promptv4.txt"
-    output = Path("results") / f"{prompt_name}_result.csv"
-    output.parent.mkdir(parents=True, exist_ok=True)
-
-    # Determine API URL
-    if api_url is None:
-        api_url = _get_api_url(internal, model)
-
-    # Display configuration in a table
-    config_table = Table(title="⚙️  Configuration", show_header=False, box=None)
-    config_table.add_column("Key", style="cyan", width=20)
-    config_table.add_column("Value", style="white")
-
-    if metadata_csv:
-        config_table.add_row("📄 Metadata CSV", str(metadata_csv))
-    config_table.add_row("📁 Images directory", str(images_dir))
-    config_table.add_row("📝 Prompt file", str(prompt))
-    config_table.add_row("💾 Output CSV", str(output))
-    config_table.add_row("🌐 API URL", api_url)
-    config_table.add_row("🤖 Model", model)
-    config_table.add_row("⚡ Workers", str(max_workers))
-    config_table.add_row("📊 Langfuse", "[green]Enabled[/green]" if enable_langfuse else "[red]Disabled[/red]")
-    if limit:
-        config_table.add_row("🔢 Limit", str(limit))
-
-    console.print(config_table)
-    console.print()
-
-    try:
-        summary = run_simple_batch_inference(
-            images_dir=images_dir,
-            prompt_path=prompt,
-            output_csv=output,
-            api_url=api_url,
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            limit=limit,
-            max_workers=max_workers,
-            enable_langfuse=enable_langfuse,
-            metadata_csv=metadata_csv,
-        )
-
-        # Display summary in a table
-        console.print()
-        summary_table = Table(title="📊 Summary", show_header=False, box=None)
-        summary_table.add_column("Key", style="cyan", width=25)
-        summary_table.add_column("Value", style="white")
-
-        # Calculate throughput
-        throughput = summary["total"] / summary["total_time"] if summary["total_time"] > 0 else 0
-        speedup = summary["avg_latency"] / summary["avg_time_per_image"] if summary["avg_time_per_image"] > 0 else 1
-
-        summary_table.add_row("🖼️  Total images", str(summary["total"]))
-        summary_table.add_row("✅ Successful", f"[green]{summary['successful']}[/green]")
-        summary_table.add_row("❌ Failed", f"[red]{summary['failed']}[/red]")
-        summary_table.add_row("⏱️  Total time", f"[bold yellow]{summary['total_time']:.2f}s[/bold yellow]")
-        summary_table.add_row("🚀 Throughput", f"[bold magenta]{throughput:.2f} images/sec[/bold magenta]")
-        summary_table.add_row("📊 Time per image (avg)", f"[bold cyan]{summary['avg_time_per_image']:.2f}s[/bold cyan]")
-        summary_table.add_row("⚡ API latency (avg)", f"{summary['avg_latency']:.3f}s")
-        summary_table.add_row("⚙️  Parallel speedup", f"[bold green]{speedup:.1f}x[/bold green]")
-        summary_table.add_row("💾 Results saved to", str(summary["output_path"]))
-
-        console.print(summary_table)
-        console.print()
-
-        console.print(Panel.fit("✓ Batch inference completed successfully!", style="bold green"))
+            console.print()
+            console.print("[cyan]Sample errors:[/cyan]")
+            for i, err in enumerate(error_samples[:2], 1):
+                if err and len(str(err)) > 100:
+                    console.print(f"  {i}. {str(err)[:100]}...")
+                elif err:
+                    console.print(f"  {i}. {err}")
+            console.print()
+            console.print(f"[yellow]Check the error column in {summary['output_path']} for full details[/yellow]")
+            raise typer.Exit(1)
+        elif summary["failed"] > 0:
+            success_rate = (summary["successful"] / summary["total"]) * 100
+            msg = (
+                f"⚠️  Batch inference completed with {summary['failed']} failures " f"({success_rate:.1f}% success rate)"
+            )
+            console.print(Panel.fit(msg, style="bold yellow"))
+        else:
+            console.print(Panel.fit("✓ Batch inference completed successfully!", style="bold green"))
 
     except Exception as e:
         console.print(f"[red]❌ Error: {e}[/red]")
@@ -444,16 +360,54 @@ def launch_dashboard(
         raise typer.Exit(1) from e
 
 
+@app.command("filter-unknown")
+def filter_unknown(
+    results_csv: Annotated[Path, typer.Argument(help="Path to inference results CSV file")],
+    output: Annotated[Path | None, typer.Argument(help="Output CSV path (optional)")] = None,
+):
+    """Filter unknown contamination types from inference results."""
+    console.print(Panel.fit("🔍 Filter Unknown Contaminations", style="bold magenta"))
+
+    # Validate input
+    if not results_csv.exists():
+        console.print(f"[red]❌ Error: Results file not found: {results_csv}[/red]")
+        raise typer.Exit(1)
+
+    # Auto-generate output path if not provided
+    if output is None:
+        output = results_csv.parent / f"{results_csv.stem}_unknown.csv"
+
+    try:
+        # Filter unknown contaminations
+        console.print(f"\n[cyan]📄 Input:[/cyan] {results_csv}")
+        console.print(f"[cyan]💾 Output:[/cyan] {output}")
+        console.print()
+
+        unknown_df = filter_unknown_contaminations(results_csv, output)
+
+        if len(unknown_df) > 0:
+            console.print()
+            console.print(Panel.fit("✓ Filtering completed successfully!", style="bold green"))
+            console.print(f"\n[green]Found {len(unknown_df)} unknown contamination entries[/green]")
+        else:
+            console.print()
+            console.print(Panel.fit("✓ No unknown contaminations found", style="bold green"))
+
+    except Exception as e:
+        console.print(f"[red]❌ Error: {e}[/red]")
+        import traceback
+
+        traceback.print_exc()
+        raise typer.Exit(1) from e
+
+
 @app.command("generate-prompt")
 def generate_prompt(
-    guideline: Annotated[Path, typer.Argument(help="Path to guideline CSV file")],
+    guideline: Annotated[Path, typer.Argument(help="Path to guideline v2 CSV file")],
     output: Annotated[Path | None, typer.Argument(help="Output prompt file path (optional)")] = None,
-    save_transformed: Annotated[
-        bool, typer.Option("--save-transformed", help="Save transformed guideline CSV")
-    ] = False,
     template_version: Annotated[int, typer.Option("--template-version", help="Template version to use")] = 1,
 ):
-    """Generate prompt template from guideline CSV."""
+    """Generate prompt template from guideline v2 CSV."""
     typer.echo("=" * 60)
     typer.echo("Prompt Generation")
     typer.echo("=" * 60)
@@ -464,44 +418,28 @@ def generate_prompt(
         raise typer.Exit(1)
 
     try:
-        # Step 1: Transform guideline
-        typer.echo("\nStep 1: Transforming guideline CSV")
+        # Step 1: Parse guideline v2
+        typer.echo("\nStep 1: Parsing guideline v2 CSV")
         typer.echo("-" * 60)
-        transformed_rows = transform_guideline_csv(guideline)
-        typer.echo(f"Transformed {len(transformed_rows)} guideline entries")
-
-        # Save transformed guideline if requested
-        if save_transformed:
-            transformed_output = guideline.parent / f"{guideline.stem}_transformed.csv"
-            save_transformed_guideline(transformed_rows, transformed_output)
-            typer.echo(f"Transformed guideline saved to: {transformed_output}")
+        parsed_rows = parse_guideline_v2(guideline)
+        typer.echo(f"Parsed {len(parsed_rows)} guideline entries")
 
         # Step 2: Generate prompt
         typer.echo("\nStep 2: Generating prompt template")
         typer.echo("-" * 60)
         typer.echo(f"Using template version: {template_version}")
-        prompt = generate_prompt_template(transformed_rows, template_version=template_version)
+        prompt = generate_prompt_template(parsed_rows, template_version=template_version)
         typer.echo("Prompt generated successfully")
 
-        # Determine output path
+        # Determine output path based on guideline version
         if output is None:
-            # Auto-generate version number
+            # Extract version from guideline filename (e.g., guideline_v2.csv -> v2)
+            guideline_stem = guideline.stem  # e.g., "guideline_v2"
+            version_str = guideline_stem.split("_v")[1] if "_v" in guideline_stem else "1"
+
             prompts_dir = guideline.parent.parent / "prompts"
             prompts_dir.mkdir(exist_ok=True)
-            existing_versions = list(prompts_dir.glob("car_contamination_classification_prompt_v*.txt"))
-            if existing_versions:
-                # Extract version numbers
-                versions = []
-                for p in existing_versions:
-                    try:
-                        version = int(p.stem.split("_v")[1])
-                        versions.append(version)
-                    except (IndexError, ValueError):
-                        continue
-                next_version = max(versions) + 1 if versions else 1
-            else:
-                next_version = 1
-            output = prompts_dir / f"car_contamination_classification_prompt_v{next_version}.txt"
+            output = prompts_dir / f"prompt_v{version_str}.txt"
 
         # Step 3: Save prompt
         typer.echo("\nStep 3: Saving prompt")
@@ -514,13 +452,7 @@ def generate_prompt(
         typer.echo("\n" + "=" * 60)
         typer.echo("✓ Prompt generation completed successfully!")
         typer.echo("=" * 60)
-
-        if save_transformed:
-            typer.echo("\nGenerated files:")
-            typer.echo(f"  - Transformed guideline: {transformed_output}")
-            typer.echo(f"  - Prompt template: {output}")
-        else:
-            typer.echo(f"\nGenerated file: {output}")
+        typer.echo(f"\nGenerated file: {output}")
 
     except Exception as e:
         typer.echo(f"Error: {e}", err=True)

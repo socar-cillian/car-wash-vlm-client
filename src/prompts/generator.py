@@ -1,31 +1,17 @@
-"""Prompt generation module for VLM inference using Jinja2 templates."""
+"""Prompt generation module for VLM inference using LangChain templates."""
 
 import csv
 import io
 from pathlib import Path
 
-from jinja2 import Environment, FileSystemLoader, Template
+from langchain_core.prompts import PromptTemplate
 
 
 # Fixed vehicle areas
 INTERIOR_AREAS = ["driver_seat", "passenger_seat", "cup_holder", "back_seat"]
 EXTERIOR_AREAS = ["front", "passenger_side", "driver_side", "rear"]
 
-# Area name mappings for display
-INTERIOR_AREAS_DISPLAY = {
-    "driver_seat": "운전석 (Driver Seat)",
-    "passenger_seat": "조수석 (Passenger Seat)",
-    "cup_holder": "컵홀더 (Cup Holder)",
-    "back_seat": "뒷좌석 (Back Seat)",
-}
-EXTERIOR_AREAS_DISPLAY = {
-    "front": "전면 (Front)",
-    "passenger_side": "조수석 방향 (Passenger Side)",
-    "driver_side": "운전석 방향 (Driver Side)",
-    "rear": "후면 (Rear)",
-}
-
-# Korean-only area name mappings (for v3 template)
+# Korean-only area name mappings
 INTERIOR_AREAS_KR = {
     "driver_seat": "운전석",
     "passenger_seat": "조수석",
@@ -39,31 +25,56 @@ EXTERIOR_AREAS_KR = {
     "rear": "후면",
 }
 
-# Severity level labels
+# Severity level labels (4-level system)
 SEVERITY_LABELS = {
     "양호": "Good",
     "보통": "Normal",
     "심각": "Critical",
+    "긴급": "Emergency",
 }
 
+# Severity labels for v2 guideline (use column names directly)
+SEVERITY_LABELS_V2 = [
+    "현상 유지 (Level 1)",
+    "관리 권장 (Level 2)",
+    "즉시 조치 (Level 3)",
+    "긴급/전문 관리 (Level 4)",
+]
 
-def transform_guideline_csv(input_csv: Path) -> list[dict]:
+
+def parse_guideline_v2(input_csv: Path) -> list[dict]:
     """
-    Transform guideline CSV from wide format to long format.
+    Parse guideline v2 CSV with new structure (no transformation needed).
 
-    Input format:
-        오염항목, 내외부 구분, 양호 (Good), 보통 (Normal), 심각 (Critical)
+    Input format (guideline_v2.csv):
+        중분류 (부위),소분류 (오염 항목),현상 유지 (Level 1),관리 권장 (Level 2),
+        즉시 조치 (Level 3),긴급/전문 관리 (Level 4)
 
-    Output format:
+    Output format (compatible with template system):
         오염항목, 내외부 구분, 오염 기준, 기준 내용
 
+    Note:
+        All 4 severity levels are preserved: 양호, 보통, 심각, 긴급
+        Duplicates across different areas (운전석, 조수석, etc.) are removed,
+        keeping only unique contamination type + severity combinations.
+
     Args:
-        input_csv: Path to input CSV file
+        input_csv: Path to guideline v2 CSV file
 
     Returns:
-        List of dictionaries with transformed data
+        List of dictionaries with parsed data
     """
-    transformed_rows = []
+    # Define interior/exterior mapping based on area names
+    area_type_mapping = {
+        "1. 운전석": "내부",
+        "2. 조수석": "내부",
+        "3. 컵홀더": "내부",
+        "4. 뒷좌석": "내부",
+        "5. 전면": "외부",
+        "6. 조수석 방향": "외부",
+        "7. 운전석 방향": "외부",
+        "8. 후면": "외부",
+    }
 
     with open(input_csv, encoding="utf-8") as f:
         # Read all lines and skip empty ones
@@ -73,61 +84,206 @@ def transform_guideline_csv(input_csv: Path) -> list[dict]:
     csv_data = io.StringIO("".join(lines))
     reader = csv.DictReader(csv_data)
 
+    # Use dict to track unique combinations
+    unique_entries = {}
+
     for row in reader:
         # Skip empty rows
-        if not row.get("오염항목") or not row.get("오염항목").strip():
+        if not row.get("중분류 (부위)") or not row.get("중분류 (부위)").strip():
             continue
 
-        contamination_type = row["오염항목"].strip()
-        # Support both column name formats
-        area_type = row.get("내외부 구분", row.get("내/외부 구분", "")).strip()
+        area = row["중분류 (부위)"].strip()
+        contamination_type = row["소분류 (오염 항목)"].strip()
 
-        # Transform each severity level into a separate row
-        for severity, column_name in [
-            ("양호", "양호 (Good)"),
-            ("보통", "보통 (Normal)"),
-            ("심각", "심각 (Critical)"),
-        ]:
-            description = row.get(column_name, "").strip()
+        # Determine interior/exterior type
+        area_type = area_type_mapping.get(area, "내부")
+
+        # Parse all 4 severity levels directly
+        for severity_col in SEVERITY_LABELS_V2:
+            description = row.get(severity_col, "").strip()
             if description:
-                transformed_rows.append(
-                    {
+                key = (contamination_type, area_type, severity_col)
+                # Keep first occurrence for duplicates
+                if key not in unique_entries:
+                    unique_entries[key] = {
                         "오염항목": contamination_type,
                         "내외부 구분": area_type,
-                        "오염 기준": severity,
+                        "오염 기준": severity_col,
                         "기준 내용": description,
                     }
-                )
 
-    return transformed_rows
+    return list(unique_entries.values())
 
 
-def save_transformed_guideline(rows: list[dict], output_path: Path):
+def _create_prompt_template() -> PromptTemplate:
     """
-    Save transformed guideline to CSV.
+    Create LangChain prompt template for car contamination classification.
 
-    Args:
-        rows: Transformed guideline rows
-        output_path: Path to save the transformed CSV
+    Returns:
+        PromptTemplate instance
     """
-    fieldnames = ["오염항목", "내외부 구분", "오염 기준", "기준 내용"]
+    template = """당신은 차량 청결 상태를 평가하는 전문가입니다. 주어진 이미지를 분석하고 제공된 가이드라인에 따라 차량의 오염 상태를 평가하세요.  # noqa: E501
 
-    with open(output_path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+# 작업 개요
+
+입력 이미지를 분석하여 다음을 판단해야 합니다:
+1. **이미지 유효성**: 차량 내부/외부 이미지인가, 아니면 관련 없는 이미지(OOD)인가?
+2. **영역 분류**: 유효한 경우, 내부인가 외부인가?
+3. **위치별 평가**: 각 차량 영역에 대해 오염 유형과 심각도를 식별
+
+# 차량 영역
+{vehicle_areas_section}
+
+# 오염 가이드라인
+{contamination_guidelines}
+
+# 유효한 오염 유형
+{contamination_types_section}
+
+# 출력 형식
+
+**중요**: 반드시 유효한 JSON 형식으로만 응답해야 합니다. JSON 앞뒤에 설명 텍스트를 포함하지 마세요.
+
+```json
+{{
+  "image_type": "내부" | "외부" | "관련없음",
+  "areas": [
+    {{
+      "area_name": "{area_names}",
+      "contamination_type": "<오염 유형 (위 목록 참조, 없으면 구체적으로 설명)>",
+      "severity": "{severity_levels}",
+      "is_in_guideline": true | false
+    }}
+  ]
+}}
+```
+
+**주의**: areas 배열에는 오염이 감지된 영역만 포함하세요. 깨끗한 영역은 생략하세요.
+
+# 평가 가이드라인
+
+1. **이미지 유형 분류**:
+   - 이미지가 차량 내부나 외부를 보여주지 않으면 "관련없음"으로 분류
+   - 이미지가 내부 영역인지 외부 영역인지 판단
+
+2. **영역별 평가**:
+{area_evaluation_section}
+   - 각 영역에 대해 오염이 있는지 판단
+   - 오염이 있으면 위에 나열된 오염 유형을 먼저 확인
+   - 가이드라인에 있는 오염 유형이면 해당 한글 이름을 정확히 사용하고 is_in_guideline을 true로 설정
+   - 가이드라인에 없는 새로운 오염 유형이면 구체적으로 설명하고 is_in_guideline을 false로 설정
+   - 가이드라인에 따라 심각도 판단
+
+3. **심각도 수준** (정확한 컬럼명 사용):
+{severity_levels_section}
+
+4. **가이드라인에 없는 부위 또는 오염 처리**:
+   - **가이드라인에 없는 오염 타입이 발견되면:**
+     - contamination_type: 오염을 구체적으로 설명 (예: "음료수 얼룩", "껌 자국", "페인트 묻음")
+     - severity: 가이드라인의 심각도 기준을 참고하여 가장 적합한 수준 선택
+     - is_in_guideline: false로 설정
+   - **가이드라인에 없는 부위에서 오염이 발견되면:**
+     - area_name: 부위를 구체적으로 설명 (예: "대시보드", "트랭크", "도어 포켓")
+     - contamination_type: 오염 유형을 설명
+     - severity: 가이드라인의 심각도 기준을 참고하여 선택
+     - is_in_guideline: false로 설정
+   - 이 정보는 향후 가이드라인 업데이트에 사용됩니다
+
+5. **중요 규칙**:
+   - **오염이 감지된 영역만 areas 배열에 포함** - 깨끗한 영역은 생략
+   - 영역이 이미지에서 보이지 않으면 areas에 포함하지 않음
+   - 가이드라인에 있는 오염은 정확한 한글 이름 사용 필수
+   - 유효한 JSON만 출력 - 추가 텍스트나 설명 없음
+   - **area_name 값은 반드시 한글로 사용** (예: "운전석", "조수석", "컵홀더", "뒷좌석", "전면", "조수석_방향", "운전석_방향", "후면")  # noqa: E501
+
+# 출력 예시
+
+**예시 1: 가이드라인에 있는 오염**
+```json
+{{
+  "image_type": "내부",
+  "areas": [
+    {{
+      "area_name": "운전석",
+      "contamination_type": "{example_interior_type}",
+      "severity": "관리 권장 (Level 2)",
+      "is_in_guideline": true
+    }},
+    {{
+      "area_name": "컵홀더",
+      "contamination_type": "컵홀더 오염",
+      "severity": "즉시 조치 (Level 3)",
+      "is_in_guideline": true
+    }}
+  ]
+}}
+```
+
+**예시 2: 가이드라인에 없는 오염 타입**
+```json
+{{
+  "image_type": "내부",
+  "areas": [
+    {{
+      "area_name": "운전석",
+      "contamination_type": "{example_interior_type}",
+      "severity": "관리 권장 (Level 2)",
+      "is_in_guideline": true
+    }},
+    {{
+      "area_name": "뒷좌석",
+      "contamination_type": "음료수 얼룩",
+      "severity": "즉시 조치 (Level 3)",
+      "is_in_guideline": false
+    }}
+  ]
+}}
+```
+
+**예시 3: 가이드라인에 없는 부위**
+```json
+{{
+  "image_type": "내부",
+  "areas": [
+    {{
+      "area_name": "대시보드",
+      "contamination_type": "먼지 적재",
+      "severity": "관리 권장 (Level 2)",
+      "is_in_guideline": false
+    }},
+    {{
+      "area_name": "트랭크",
+      "contamination_type": "흙/모래",
+      "severity": "즉시 조치 (Level 3)",
+      "is_in_guideline": false
+    }}
+  ]
+}}
+```
+
+**예시 4: 완전히 깨끗함**
+```json
+{{
+  "image_type": "내부",
+  "areas": []
+}}
+```
+
+이제 제공된 이미지를 분석하고 지정된 JSON 형식으로 평가를 반환하세요. 기억하세요: JSON만 출력하고 다른 텍스트는 출력하지 마세요."""  # noqa: E501
+
+    return PromptTemplate.from_template(template)
 
 
 def generate_prompt_template(
-    transformed_rows: list[dict], template_path: Path | None = None, template_version: int = 1
+    parsed_rows: list[dict], template_path: Path | None = None, template_version: int = 1
 ) -> str:
     """
-    Generate prompt template from transformed guideline data using Jinja2.
+    Generate prompt template from parsed guideline data using LangChain.
 
     Args:
-        transformed_rows: Transformed guideline data
-        template_path: Optional custom template path
-        template_version: Template version to use (default: 1)
+        parsed_rows: Parsed guideline data from parse_guideline_v2()
+        template_path: Optional custom template path (deprecated, kept for compatibility)
+        template_version: Template version to use (deprecated, kept for compatibility)
 
     Returns:
         Generated prompt text
@@ -136,7 +292,7 @@ def generate_prompt_template(
     interior_items = {}
     exterior_items = {}
 
-    for row in transformed_rows:
+    for row in parsed_rows:
         contamination_type = row["오염항목"]
         area_type = row["내외부 구분"]
         severity = row["오염 기준"]
@@ -149,170 +305,107 @@ def generate_prompt_template(
 
         target_dict[contamination_type][severity] = description
 
-    # Prepare template data
-    interior_area_display = [INTERIOR_AREAS_DISPLAY[area] for area in INTERIOR_AREAS]
-    exterior_area_display = [EXTERIOR_AREAS_DISPLAY[area] for area in EXTERIOR_AREAS]
-
-    # Korean-only area names (for v3 template)
+    # Korean-only area names
     interior_areas_kr = [INTERIOR_AREAS_KR[area] for area in INTERIOR_AREAS]
     exterior_areas_kr = [EXTERIOR_AREAS_KR[area] for area in EXTERIOR_AREAS]
     all_areas_kr = interior_areas_kr + exterior_areas_kr
 
-    # Generate contamination type enum values (for v1/v2 templates)
-    interior_enum_values = [f'"{_sanitize_enum_value(ct)}"' for ct in interior_items]
-    exterior_enum_values = [f'"{_sanitize_enum_value(ct)}"' for ct in exterior_items]
-    all_enum_values = interior_enum_values + exterior_enum_values
-
-    # Extract contamination type lists (for v3 template)
+    # Extract contamination type lists
     interior_contamination_types = list(interior_items.keys())
     exterior_contamination_types = list(exterior_items.keys())
 
-    # Extract severity levels from the data
+    # Extract severity levels from the data (use exact column names)
     severity_levels = set()
-    for row in transformed_rows:
+    for row in parsed_rows:
         severity_levels.add(row["오염 기준"])
-    severity_levels_list = sorted(
-        severity_levels, key=lambda x: ["양호", "보통", "심각"].index(x) if x in ["양호", "보통", "심각"] else 999
+
+    # Sort by the order in SEVERITY_LABELS_V2
+    severity_levels_list = []
+    for severity in SEVERITY_LABELS_V2:
+        if severity in severity_levels:
+            severity_levels_list.append(severity)
+
+    # Build vehicle areas section
+    vehicle_areas_parts = []
+    if interior_areas_kr:
+        vehicle_areas_parts.append(f"**내부 영역**: {', '.join(interior_areas_kr)}")
+    if exterior_areas_kr:
+        vehicle_areas_parts.append(f"**외부 영역**: {', '.join(exterior_areas_kr)}")
+    vehicle_areas_section = "\n".join(vehicle_areas_parts)
+
+    # Build contamination guidelines section
+    guidelines_parts = []
+
+    if interior_items:
+        guidelines_parts.append("## 내부 오염 가이드라인")
+        for idx, (contamination_type, severities) in enumerate(interior_items.items(), 1):
+            guidelines_parts.append(f"\n### {idx}. {contamination_type}")
+            for severity in severity_levels_list:
+                if severity in severities:
+                    guidelines_parts.append(f"**{severity}**: {severities[severity]}")
+
+    if exterior_items:
+        if guidelines_parts:
+            guidelines_parts.append("")
+        guidelines_parts.append("## 외부 오염 가이드라인")
+        for idx, (contamination_type, severities) in enumerate(exterior_items.items(), 1):
+            guidelines_parts.append(f"\n### {idx}. {contamination_type}")
+            for severity in severity_levels_list:
+                if severity in severities:
+                    guidelines_parts.append(f"**{severity}**: {severities[severity]}")
+
+    contamination_guidelines = "\n".join(guidelines_parts)
+
+    # Build contamination types section
+    contamination_types_parts = []
+    if interior_contamination_types:
+        contamination_types_parts.append("**내부:**")
+        for ctype in interior_contamination_types:
+            contamination_types_parts.append(f"- {ctype}")
+        contamination_types_parts.append("- 깨끗함 (오염 없음)")
+
+    if exterior_contamination_types:
+        if contamination_types_parts:
+            contamination_types_parts.append("")
+        contamination_types_parts.append("**외부:**")
+        for ctype in exterior_contamination_types:
+            contamination_types_parts.append(f"- {ctype}")
+        contamination_types_parts.append("- 깨끗함 (오염 없음)")
+
+    contamination_types_section = "\n".join(contamination_types_parts)
+
+    # Build area evaluation section
+    area_eval_parts = []
+    if interior_areas_kr:
+        area_eval_parts.append(f"   - 내부 이미지의 경우, 다음을 모두 평가: {', '.join(interior_areas_kr)}")
+    if exterior_areas_kr:
+        area_eval_parts.append(f"   - 외부 이미지의 경우, 다음을 모두 평가: {', '.join(exterior_areas_kr)}")
+    area_evaluation_section = "\n".join(area_eval_parts)
+
+    # Build severity levels section (use exact column names)
+    severity_parts = []
+    for severity in severity_levels_list:
+        severity_parts.append(f"   - **{severity}**")
+    severity_levels_section = "\n".join(severity_parts)
+
+    # Create template and format with data
+    prompt_template = _create_prompt_template()
+
+    # Get example contamination types for examples
+    example_interior_type = interior_contamination_types[0] if interior_contamination_types else "오염항목"
+    example_exterior_type = exterior_contamination_types[0] if exterior_contamination_types else "오염항목"
+
+    # Format the prompt
+    formatted_prompt = prompt_template.format(
+        vehicle_areas_section=vehicle_areas_section,
+        contamination_guidelines=contamination_guidelines,
+        contamination_types_section=contamination_types_section,
+        area_names='" | "'.join(all_areas_kr),
+        area_evaluation_section=area_evaluation_section,
+        severity_levels_section=severity_levels_section,
+        severity_levels='" | "'.join(severity_levels_list),
+        example_interior_type=example_interior_type,
+        example_exterior_type=example_exterior_type,
     )
 
-    template_data = {
-        "interior_areas": interior_area_display,
-        "exterior_areas": exterior_area_display,
-        "interior_area_codes": INTERIOR_AREAS,
-        "exterior_area_codes": EXTERIOR_AREAS,
-        "all_areas": INTERIOR_AREAS + EXTERIOR_AREAS,
-        "interior_items": interior_items,
-        "exterior_items": exterior_items,
-        "severity_labels": SEVERITY_LABELS,
-        "contamination_types": all_enum_values,
-        # For v3 template (Korean only)
-        "interior_areas_kr": interior_areas_kr,
-        "exterior_areas_kr": exterior_areas_kr,
-        "all_areas_kr": all_areas_kr,
-        "interior_contamination_types": interior_contamination_types,
-        "exterior_contamination_types": exterior_contamination_types,
-        "severity_levels": severity_levels_list,
-    }
-
-    # Load and render template
-    if template_path and template_path.exists():
-        # Use custom template
-        env = Environment(loader=FileSystemLoader(template_path.parent))
-        template = env.get_template(template_path.name)
-    else:
-        # Use default versioned template
-        # Path from src/prompts/generator.py to prompts/templates/
-        template_dir = Path(__file__).parent.parent.parent / "prompts" / "templates"
-        template_filename = f"contamination_classification_v{template_version}.j2"
-
-        if template_dir.exists() and (template_dir / template_filename).exists():
-            env = Environment(loader=FileSystemLoader(template_dir))
-            template = env.get_template(template_filename)
-        else:
-            # Fallback to inline template
-            print(f"Warning: Template not found at {template_dir / template_filename}, using fallback")
-            template = Template(_get_default_template())
-
-    return template.render(**template_data)
-
-
-def _sanitize_enum_value(value: str) -> str:
-    """Convert contamination type to enum-friendly format."""
-    return value.replace("/", "_").replace(" ", "_").replace("(", "").replace(")", "").lower()
-
-
-def _get_default_template() -> str:
-    """Get default template as string (fallback if template file not found)."""
-    return """You are an expert vehicle cleanliness inspector. Analyze the given image and provide a comprehensive \
-assessment of vehicle contamination according to the provided guidelines.
-
-# Task Overview
-
-You must analyze the input image and determine:
-1. **Image Validity**: Is this a vehicle interior/exterior image, or out-of-distribution (OOD)?
-2. **Area Classification**: If valid, is it interior or exterior?
-3. **Location-Specific Assessment**: For each relevant vehicle area, identify contamination type and severity
-
-# Vehicle Areas
-
-**Interior Areas**: {{ interior_areas|join(', ') }}
-**Exterior Areas**: {{ exterior_areas|join(', ') }}
-
-{% if interior_items %}
-# Interior Contamination Guidelines
-
-{% for contamination_type, severities in interior_items.items() %}
-## {{ loop.index }}. {{ contamination_type }}
-
-{% for severity in ['양호', '보통', '심각'] %}
-{% if severity in severities %}
-**{{ severity_labels[severity] }}**:
-{{ severities[severity] }}
-
-{% endif %}
-{% endfor %}
-{% endfor %}
-{% endif %}
-
-{% if exterior_items %}
-# Exterior Contamination Guidelines
-
-{% for contamination_type, severities in exterior_items.items() %}
-## {{ loop.index }}. {{ contamination_type }}
-
-{% for severity in ['양호', '보통', '심각'] %}
-{% if severity in severities %}
-**{{ severity_labels[severity] }}**:
-{{ severities[severity] }}
-
-{% endif %}
-{% endfor %}
-{% endfor %}
-{% endif %}
-
-# Output Format
-
-Provide your assessment in the following JSON format:
-
-```json
-{
-  "image_type": "interior" | "exterior" | "ood",
-  "areas": [
-    {
-      "area_name": "<one of: {{ all_areas|join(', ') }}>",
-      "contamination_detected": true | false,
-      "contamination_type": {{ contamination_types|join(' | ') }} | "clean" | "unknown",
-      "severity": "good" | "normal" | "critical" | "clean" | "not_applicable"
-    }
-  ]
-}
-```
-
-# Assessment Guidelines
-
-1. **Image Type Classification**:
-   - If the image does not show a vehicle interior or exterior, classify as "ood"
-   - Determine whether the image shows interior or exterior areas
-
-2. **Area-Specific Assessment**:
-   - For interior images, assess: {{ interior_area_codes|join(', ') }}
-   - For exterior images, assess: {{ exterior_area_codes|join(', ') }}
-   - For each area, determine if contamination is present
-   - If contamination exists, identify the type and severity according to guidelines
-
-3. **Severity Levels**:
-   - **good** (양호): Minor contamination, acceptable condition
-   - **normal** (보통): Moderate contamination, cleaning recommended
-   - **critical** (심각): Severe contamination, immediate cleaning required
-   - **clean**: No contamination detected
-   - **not_applicable**: Area not visible or image is OOD
-
-# Important Notes
-
-- Be thorough and systematic in your analysis
-- Use the provided guidelines strictly for severity classification
-- If an area is not visible in the image, mark severity as "not_applicable"
-- Only return the JSON output without additional text
-
-Now, please analyze the provided image and return your assessment in the specified JSON format.
-"""
+    return formatted_prompt

@@ -3,7 +3,7 @@
 from src.api import VLMClient
 from src.api.exceptions import ImageNotFoundError, InvalidImageFormatError, PromptNotFoundError, VLMClientError
 from src.inference import run_batch_inference
-from src.prompts import generate_prompt_template, save_transformed_guideline, transform_guideline_csv
+from src.prompts import generate_prompt_template, parse_guideline_v2
 
 
 __all__ = [
@@ -14,6 +14,5 @@ __all__ = [
     "InvalidImageFormatError",
     "run_batch_inference",
     "generate_prompt_template",
-    "save_transformed_guideline",
-    "transform_guideline_csv",
+    "parse_guideline_v2",
 ]

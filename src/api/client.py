@@ -22,11 +22,9 @@ class VLMClient:
         self,
         api_url: str,
         model: str = "qwen3-vl-8b-instruct",
-        langfuse_monitor=None,
     ):
         self.api_url = api_url
         self.model = model
-        self.langfuse_monitor = langfuse_monitor
 
         # Setup session with retry logic
         self.session = requests.Session()
@@ -38,6 +36,74 @@ class VLMClient:
         adapter = HTTPAdapter(max_retries=retry_strategy)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
+
+    def check_health(self, timeout: int = 10) -> dict:
+        """
+        Check if the VLM API server is healthy and accessible.
+
+        Args:
+            timeout: Timeout in seconds for the health check
+
+        Returns:
+            Dictionary with health check results:
+            {
+                "healthy": bool,
+                "status_code": int or None,
+                "error": str or None,
+                "response_time": float (in seconds)
+            }
+
+        Raises:
+            Does not raise exceptions - returns error information in dict
+        """
+
+        start_time = time.time()
+
+        try:
+            # Try to get the models endpoint first (common in OpenAI-compatible APIs)
+            base_url = self.api_url.rsplit("/v1/", 1)[0] if "/v1/" in self.api_url else self.api_url
+            health_endpoints = [
+                f"{base_url}/health",
+                f"{base_url}/v1/models",
+                f"{base_url}/healthz",
+            ]
+
+            last_error = None
+            for endpoint in health_endpoints:
+                try:
+                    response = self.session.get(endpoint, timeout=timeout)
+                    response_time = time.time() - start_time
+
+                    if response.status_code == 200:
+                        return {
+                            "healthy": True,
+                            "status_code": response.status_code,
+                            "error": None,
+                            "response_time": response_time,
+                            "endpoint": endpoint,
+                        }
+                    last_error = f"Status code: {response.status_code}"
+                except requests.exceptions.RequestException as e:
+                    last_error = str(e)
+                    continue
+
+            # If all endpoints failed, return the last error
+            response_time = time.time() - start_time
+            return {
+                "healthy": False,
+                "status_code": None,
+                "error": last_error or "All health check endpoints failed",
+                "response_time": response_time,
+            }
+
+        except Exception as e:
+            response_time = time.time() - start_time
+            return {
+                "healthy": False,
+                "status_code": None,
+                "error": str(e),
+                "response_time": response_time,
+            }
 
     def _load_prompt(self, prompt_input: str) -> str:
         """Load prompt from text file or use as direct string."""
@@ -127,8 +193,6 @@ class VLMClient:
             InvalidImageFormatError: If image format is not supported
             requests.exceptions.RequestException: If API request fails
         """
-        start_time = time.time()
-
         # Prepare image and prompt
         image_url = self._prepare_image(image_input)
         prompt = self._load_prompt(prompt_input)
@@ -157,63 +221,26 @@ class VLMClient:
         if response_format is not None:
             payload["response_format"] = response_format
 
-        # Log to Langfuse if enabled
-        generation = None
-        if self.langfuse_monitor and self.langfuse_monitor.enabled:
-            try:
-                generation = self.langfuse_monitor.start_generation(
-                    name=f"vlm_inference_{image_name}",
-                    model=self.model,
-                    input_data={
-                        "image": image_name,
-                        "prompt": prompt[:200] + "..." if len(prompt) > 200 else prompt,
-                    },
-                    model_parameters={
-                        "max_tokens": max_tokens,
-                        "temperature": temperature,
-                    },
-                    metadata={
-                        "image_name": image_name,
-                        "api_url": self.api_url,
-                    },
-                )
-            except Exception as e:
-                print(f"Warning: Failed to start Langfuse generation: {e}")
-                generation = None
-
         # Send request with retry and increased timeout
         headers = {"Content-Type": "application/json"}
-        response = self.session.post(self.api_url, headers=headers, json=payload, timeout=120)
 
-        response.raise_for_status()
-
-        result = response.json()
-        end_time = time.time()
-        latency = end_time - start_time
-
-        # Update generation with results if using context manager
-        if generation:
+        try:
+            response = self.session.post(self.api_url, headers=headers, json=payload, timeout=120)
+            response.raise_for_status()
+            result = response.json()
+            return result
+        except requests.exceptions.HTTPError as e:
+            # Try to extract error details from response
+            error_detail = "Unknown error"
             try:
-                with generation as gen:
-                    # Extract response content
-                    output_text = ""
-                    if "choices" in result and len(result["choices"]) > 0:
-                        output_text = result["choices"][0]["message"]["content"]
+                if response.text:
+                    error_json = response.json()
+                    error_detail = error_json.get("detail", error_json.get("message", response.text[:200]))
+            except Exception:
+                error_detail = response.text[:200] if response.text else str(e)
 
-                    # Extract usage information if available
-                    usage = result.get("usage", {})
-
-                    # Update generation with output
-                    gen.update(
-                        output={"response": output_text[:500] + "..." if len(output_text) > 500 else output_text},
-                        usage=usage if usage else None,
-                        metadata={
-                            "image_name": image_name,
-                            "api_url": self.api_url,
-                            "latency_seconds": latency,
-                        },
-                    )
-            except Exception as e:
-                print(f"Warning: Failed to update Langfuse generation: {e}")
-
-        return result
+            # Re-raise with more detailed error message
+            raise requests.exceptions.HTTPError(
+                f"{response.status_code} {response.reason}: {error_detail}",
+                response=response,
+            ) from e
