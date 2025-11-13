@@ -38,12 +38,12 @@ def _get_api_url(internal: bool, model: str) -> str:
     if internal:
         # Internal Kubernetes service URL format: <service_name>.<namespace>.svc.cluster.local
         # Default to qwen3-vl-8b for now
-        service_name = "vllm-test-qwen3-vl-8b-engine-service"
-        namespace = "vllm-test"
+        service_name = "vllm-qwen3-vl-8b-engine-service"
+        namespace = "vllm"
         return f"http://{service_name}.{namespace}.svc.cluster.local:8000/v1/chat/completions"
     else:
         # External URL
-        return "https://vllm-test.mlops.socarcorp.co.kr/v1/chat/completions"
+        return "https://vllm.mlops.socarcorp.co.kr/v1/chat/completions"
 
 
 @app.command("infer")
