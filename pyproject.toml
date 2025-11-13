@@ -31,7 +31,7 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["src", "src.api", "src.inference", "src.prompts", "src.dashboard", "src.utils"]
+packages = ["src", "src.api", "src.inference", "src.prompts", "src.utils"]
 
 [tool.ruff]
 line-length = 120
