@@ -12,7 +12,6 @@ from rich.table import Table
 from src.api import VLMClient
 from src.inference import run_batch_inference
 from src.prompts import generate_prompt_template, parse_guideline_v2
-from src.utils import filter_unknown_contaminations
 
 
 console = Console()
@@ -320,78 +319,6 @@ def batch_inference(
             console.print(Panel.fit(msg, style="bold yellow"))
         else:
             console.print(Panel.fit("✓ Batch inference completed successfully!", style="bold green"))
-
-    except Exception as e:
-        console.print(f"[red]❌ Error: {e}[/red]")
-        import traceback
-
-        traceback.print_exc()
-        raise typer.Exit(1) from e
-
-
-@app.command("dashboard")
-def launch_dashboard(
-    port: Annotated[int, typer.Option(help="Port to run the dashboard on")] = 8501,
-):
-    """Launch the Streamlit dashboard for visualizing inference results."""
-    import subprocess
-    import sys
-
-    console.print(Panel.fit("📊 Launching Streamlit Dashboard", style="bold magenta"))
-    console.print()
-    console.print(f"[cyan]🌐 Dashboard will be available at:[/cyan] [green]http://localhost:{port}[/green]")
-    console.print("[cyan]📂 Default CSV path:[/cyan] results/inference_results.csv")
-    console.print("[cyan]📁 Default images path:[/cyan] images/sample_images/images")
-    console.print()
-    console.print("[yellow]Press Ctrl+C to stop the server[/yellow]")
-    console.print()
-
-    try:
-        # Run streamlit
-        subprocess.run(
-            [sys.executable, "-m", "streamlit", "run", "src/dashboard/app.py", "--server.port", str(port)],
-            check=True,
-        )
-    except KeyboardInterrupt:
-        console.print()
-        console.print(Panel.fit("✓ Dashboard stopped", style="bold green"))
-    except subprocess.CalledProcessError as e:
-        console.print(f"[red]❌ Error running dashboard: {e}[/red]")
-        raise typer.Exit(1) from e
-
-
-@app.command("filter-unknown")
-def filter_unknown(
-    results_csv: Annotated[Path, typer.Argument(help="Path to inference results CSV file")],
-    output: Annotated[Path | None, typer.Argument(help="Output CSV path (optional)")] = None,
-):
-    """Filter unknown contamination types from inference results."""
-    console.print(Panel.fit("🔍 Filter Unknown Contaminations", style="bold magenta"))
-
-    # Validate input
-    if not results_csv.exists():
-        console.print(f"[red]❌ Error: Results file not found: {results_csv}[/red]")
-        raise typer.Exit(1)
-
-    # Auto-generate output path if not provided
-    if output is None:
-        output = results_csv.parent / f"{results_csv.stem}_unknown.csv"
-
-    try:
-        # Filter unknown contaminations
-        console.print(f"\n[cyan]📄 Input:[/cyan] {results_csv}")
-        console.print(f"[cyan]💾 Output:[/cyan] {output}")
-        console.print()
-
-        unknown_df = filter_unknown_contaminations(results_csv, output)
-
-        if len(unknown_df) > 0:
-            console.print()
-            console.print(Panel.fit("✓ Filtering completed successfully!", style="bold green"))
-            console.print(f"\n[green]Found {len(unknown_df)} unknown contamination entries[/green]")
-        else:
-            console.print()
-            console.print(Panel.fit("✓ No unknown contaminations found", style="bold green"))
 
     except Exception as e:
         console.print(f"[red]❌ Error: {e}[/red]")

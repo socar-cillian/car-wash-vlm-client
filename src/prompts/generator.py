@@ -35,10 +35,10 @@ SEVERITY_LABELS = {
 
 # Severity labels for v2 guideline (use column names directly)
 SEVERITY_LABELS_V2 = [
-    "현상 유지 (Level 1)",
-    "관리 권장 (Level 2)",
-    "즉시 조치 (Level 3)",
-    "긴급/전문 관리 (Level 4)",
+    "Level 1",
+    "Level 2",
+    "Level 3",
+    "Level 4",
 ]
 
 
@@ -150,15 +150,21 @@ def _create_prompt_template() -> PromptTemplate:
   "areas": [
     {{
       "area_name": "{area_names}",
-      "contamination_type": "<오염 유형 (위 목록 참조, 없으면 구체적으로 설명)>",
-      "severity": "{severity_levels}",
-      "is_in_guideline": true | false
+      "contaminations": [
+        {{
+          "contamination_type": "<오염 유형 (위 목록 참조, 없으면 구체적으로 설명)>",
+          "severity": "{severity_levels}",
+          "is_in_guideline": true | false
+        }}
+      ]
     }}
   ]
 }}
 ```
 
-**주의**: areas 배열에는 오염이 감지된 영역만 포함하세요. 깨끗한 영역은 생략하세요.
+**주의**:
+- areas 배열에는 오염이 감지된 영역만 포함하세요. 깨끗한 영역은 생략하세요.
+- 한 부위에 여러 오염이 있으면 contaminations 배열에 모두 포함하세요.
 
 # 평가 가이드라인
 
@@ -169,6 +175,8 @@ def _create_prompt_template() -> PromptTemplate:
 2. **영역별 평가**:
 {area_evaluation_section}
    - 각 영역에 대해 오염이 있는지 판단
+   - **중요**: 이미지에서 명확히 보이는 부위만 평가하세요. 보이지 않는 부분은 추정하지 말고 완전히 생략하세요.
+   - 한 부위에 여러 오염이 동시에 존재할 수 있으므로 모든 오염을 contaminations 배열에 포함
    - 오염이 있으면 위에 나열된 오염 유형을 먼저 확인
    - 가이드라인에 있는 오염 유형이면 해당 한글 이름을 정확히 사용하고 is_in_guideline을 true로 설정
    - 가이드라인에 없는 새로운 오염 유형이면 구체적으로 설명하고 is_in_guideline을 false로 설정
@@ -179,41 +187,60 @@ def _create_prompt_template() -> PromptTemplate:
 
 4. **가이드라인에 없는 부위 또는 오염 처리**:
    - **가이드라인에 없는 오염 타입이 발견되면:**
+     - contaminations 배열에 추가
      - contamination_type: 오염을 구체적으로 설명 (예: "음료수 얼룩", "껌 자국", "페인트 묻음")
      - severity: 가이드라인의 심각도 기준을 참고하여 가장 적합한 수준 선택
      - is_in_guideline: false로 설정
    - **가이드라인에 없는 부위에서 오염이 발견되면:**
      - area_name: 부위를 구체적으로 설명 (예: "대시보드", "트랭크", "도어 포켓")
-     - contamination_type: 오염 유형을 설명
-     - severity: 가이드라인의 심각도 기준을 참고하여 선택
+     - contaminations 배열에 오염 정보 포함
      - is_in_guideline: false로 설정
    - 이 정보는 향후 가이드라인 업데이트에 사용됩니다
 
 5. **중요 규칙**:
    - **오염이 감지된 영역만 areas 배열에 포함** - 깨끗한 영역은 생략
-   - 영역이 이미지에서 보이지 않으면 areas에 포함하지 않음
+   - **영역이 이미지에서 명확히 보이지 않으면 areas에 포함하지 않음** - 보이지 않는 부분은 추정하지 말 것
+   - 한 부위에 여러 오염이 있으면 contaminations 배열에 모두 나열
    - 가이드라인에 있는 오염은 정확한 한글 이름 사용 필수
    - 유효한 JSON만 출력 - 추가 텍스트나 설명 없음
    - **area_name 값은 반드시 한글로 사용** (예: "운전석", "조수석", "컵홀더", "뒷좌석", "전면", "조수석_방향", "운전석_방향", "후면")  # noqa: E501
 
 # 출력 예시
 
-**예시 1: 가이드라인에 있는 오염**
+**예시 1: 한 부위에 여러 오염 (가장 일반적인 케이스)**
 ```json
 {{
   "image_type": "내부",
   "areas": [
     {{
       "area_name": "운전석",
-      "contamination_type": "{example_interior_type}",
-      "severity": "관리 권장 (Level 2)",
-      "is_in_guideline": true
+      "contaminations": [
+        {{
+          "contamination_type": "{example_interior_type}",
+          "severity": "Level 2",
+          "is_in_guideline": true
+        }},
+        {{
+          "contamination_type": "시트 얼룩",
+          "severity": "Level 1",
+          "is_in_guideline": true
+        }}
+      ]
     }},
     {{
       "area_name": "컵홀더",
-      "contamination_type": "컵홀더 오염",
-      "severity": "즉시 조치 (Level 3)",
-      "is_in_guideline": true
+      "contaminations": [
+        {{
+          "contamination_type": "컵홀더 오염",
+          "severity": "Level 3",
+          "is_in_guideline": true
+        }},
+        {{
+          "contamination_type": "얼룩/쓰레기",
+          "severity": "Level 1",
+          "is_in_guideline": true
+        }}
+      ]
     }}
   ]
 }}
@@ -226,15 +253,23 @@ def _create_prompt_template() -> PromptTemplate:
   "areas": [
     {{
       "area_name": "운전석",
-      "contamination_type": "{example_interior_type}",
-      "severity": "관리 권장 (Level 2)",
-      "is_in_guideline": true
+      "contaminations": [
+        {{
+          "contamination_type": "{example_interior_type}",
+          "severity": "Level 2",
+          "is_in_guideline": true
+        }}
+      ]
     }},
     {{
       "area_name": "뒷좌석",
-      "contamination_type": "음료수 얼룩",
-      "severity": "즉시 조치 (Level 3)",
-      "is_in_guideline": false
+      "contaminations": [
+        {{
+          "contamination_type": "음료수 얼룩",
+          "severity": "Level 3",
+          "is_in_guideline": false
+        }}
+      ]
     }}
   ]
 }}
@@ -247,15 +282,23 @@ def _create_prompt_template() -> PromptTemplate:
   "areas": [
     {{
       "area_name": "대시보드",
-      "contamination_type": "먼지 적재",
-      "severity": "관리 권장 (Level 2)",
-      "is_in_guideline": false
+      "contaminations": [
+        {{
+          "contamination_type": "먼지 적재",
+          "severity": "Level 2",
+          "is_in_guideline": false
+        }}
+      ]
     }},
     {{
       "area_name": "트랭크",
-      "contamination_type": "흙/모래",
-      "severity": "즉시 조치 (Level 3)",
-      "is_in_guideline": false
+      "contaminations": [
+        {{
+          "contamination_type": "흙/모래",
+          "severity": "Level 3",
+          "is_in_guideline": false
+        }}
+      ]
     }}
   ]
 }}
