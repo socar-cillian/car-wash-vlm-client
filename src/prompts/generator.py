@@ -51,29 +51,24 @@ def parse_guideline_v2(input_csv: Path) -> list[dict]:
         즉시 조치 (Level 3),긴급/전문 관리 (Level 4)
 
     Output format (compatible with template system):
-        오염항목, 내외부 구분, 오염 기준, 기준 내용
-
-    Note:
-        All 4 severity levels are preserved: 양호, 보통, 심각, 긴급
-        Duplicates across different areas (운전석, 조수석, etc.) are removed,
-        keeping only unique contamination type + severity combinations.
+        오염항목, 내외부 구분, 오염 기준, 기준 내용, 부위
 
     Args:
         input_csv: Path to guideline v2 CSV file
 
     Returns:
-        List of dictionaries with parsed data
+        List of dictionaries with parsed data (area-specific rows preserved)
     """
-    # Define interior/exterior mapping based on area names
-    area_type_mapping = {
-        "1. 운전석": "내부",
-        "2. 조수석": "내부",
-        "3. 컵홀더": "내부",
-        "4. 뒷좌석": "내부",
-        "5. 전면": "외부",
-        "6. 조수석 방향": "외부",
-        "7. 운전석 방향": "외부",
-        "8. 후면": "외부",
+    # Define area normalization + interior/exterior mapping
+    area_map = {
+        "1. 운전석": ("운전석", "내부"),
+        "2. 조수석": ("조수석", "내부"),
+        "3. 컵홀더": ("컵홀더", "내부"),
+        "4. 뒷좌석": ("뒷좌석", "내부"),
+        "5. 전면": ("전면", "외부"),
+        "6. 조수석 방향": ("조수석_방향", "외부"),
+        "7. 운전석 방향": ("운전석_방향", "외부"),
+        "8. 후면": ("후면", "외부"),
     }
 
     with open(input_csv, encoding="utf-8") as f:
@@ -92,25 +87,26 @@ def parse_guideline_v2(input_csv: Path) -> list[dict]:
         if not row.get("중분류 (부위)") or not row.get("중분류 (부위)").strip():
             continue
 
-        area = row["중분류 (부위)"].strip()
+        area_raw = row["중분류 (부위)"].strip()
+        area_name, area_type = area_map.get(area_raw, (area_raw, "내부"))
         contamination_type = row["소분류 (오염 항목)"].strip()
-
-        # Determine interior/exterior type
-        area_type = area_type_mapping.get(area, "내부")
 
         # Parse all 4 severity levels directly
         for severity_col in SEVERITY_LABELS_V2:
             description = row.get(severity_col, "").strip()
             if description:
-                key = (contamination_type, area_type, severity_col)
-                # Keep first occurrence for duplicates
-                if key not in unique_entries:
-                    unique_entries[key] = {
-                        "오염항목": contamination_type,
-                        "내외부 구분": area_type,
-                        "오염 기준": severity_col,
-                        "기준 내용": description,
-                    }
+                key = (area_name, contamination_type, area_type, severity_col)
+                # Keep first occurrence for duplicates per area/type/severity
+                if key in unique_entries:
+                    continue
+
+                unique_entries[key] = {
+                    "부위": area_name,
+                    "오염항목": contamination_type,
+                    "내외부 구분": area_type,
+                    "오염 기준": severity_col,
+                    "기준 내용": description,
+                }
 
     return list(unique_entries.values())
 
@@ -203,7 +199,7 @@ def _create_prompt_template() -> PromptTemplate:
    - 한 부위에 여러 오염이 있으면 contaminations 배열에 모두 나열
    - 가이드라인에 있는 오염은 정확한 한글 이름 사용 필수
    - 유효한 JSON만 출력 - 추가 텍스트나 설명 없음
-   - **area_name 값은 반드시 한글로 사용** (예: "운전석", "조수석", "컵홀더", "뒷좌석", "전면", "조수석_방향", "운전석_방향", "후면")  # noqa: E501
+   - **area_name 값은 반드시 한글로 사용** (예: "{area_name_examples}")  # noqa: E501
 
 # 출력 예시
 
@@ -213,31 +209,26 @@ def _create_prompt_template() -> PromptTemplate:
   "image_type": "내부",
   "areas": [
     {{
-      "area_name": "운전석",
+      "area_name": "{example_interior_area_1}",
       "contaminations": [
         {{
-          "contamination_type": "{example_interior_type}",
-          "severity": "Level 2",
+          "contamination_type": "{example_interior_type_primary}",
+          "severity": "{example_severity_secondary}",
           "is_in_guideline": true
         }},
         {{
-          "contamination_type": "시트 얼룩",
-          "severity": "Level 1",
+          "contamination_type": "{example_interior_type_secondary}",
+          "severity": "{example_severity_primary}",
           "is_in_guideline": true
         }}
       ]
     }},
     {{
-      "area_name": "컵홀더",
+      "area_name": "{example_interior_area_2}",
       "contaminations": [
         {{
-          "contamination_type": "컵홀더 오염",
-          "severity": "Level 3",
-          "is_in_guideline": true
-        }},
-        {{
-          "contamination_type": "얼룩/쓰레기",
-          "severity": "Level 1",
+          "contamination_type": "{example_interior_type_secondary}",
+          "severity": "{example_severity_tertiary}",
           "is_in_guideline": true
         }}
       ]
@@ -252,11 +243,11 @@ def _create_prompt_template() -> PromptTemplate:
   "image_type": "내부",
   "areas": [
     {{
-      "area_name": "운전석",
+      "area_name": "{example_interior_area_1}",
       "contaminations": [
         {{
-          "contamination_type": "{example_interior_type}",
-          "severity": "Level 2",
+          "contamination_type": "{example_interior_type_primary}",
+          "severity": "{example_severity_secondary}",
           "is_in_guideline": true
         }}
       ]
@@ -265,8 +256,8 @@ def _create_prompt_template() -> PromptTemplate:
       "area_name": "뒷좌석",
       "contaminations": [
         {{
-          "contamination_type": "음료수 얼룩",
-          "severity": "Level 3",
+          "contamination_type": "새로운 오염 유형",
+          "severity": "{example_severity_tertiary}",
           "is_in_guideline": false
         }}
       ]
@@ -331,31 +322,28 @@ def generate_prompt_template(
     Returns:
         Generated prompt text
     """
-    # Group data by contamination type and area
-    interior_items = {}
-    exterior_items = {}
+    # Group data by area -> contamination -> severity
+    interior_guidelines: dict[str, dict[str, dict[str, str]]] = {}
+    exterior_guidelines: dict[str, dict[str, dict[str, str]]] = {}
 
     for row in parsed_rows:
+        area_name = row.get("부위") or ""
         contamination_type = row["오염항목"]
         area_type = row["내외부 구분"]
         severity = row["오염 기준"]
         description = row["기준 내용"]
 
-        target_dict = interior_items if area_type == "내부" else exterior_items
+        target_dict = interior_guidelines if area_type == "내부" else exterior_guidelines
+        area_bucket = target_dict.setdefault(area_name, {})
+        area_bucket.setdefault(contamination_type, {})[severity] = description
 
-        if contamination_type not in target_dict:
-            target_dict[contamination_type] = {}
+    # Area order (Korean display)
+    interior_area_order = [INTERIOR_AREAS_KR[area] for area in INTERIOR_AREAS]
+    exterior_area_order = [EXTERIOR_AREAS_KR[area] for area in EXTERIOR_AREAS]
 
-        target_dict[contamination_type][severity] = description
-
-    # Korean-only area names
-    interior_areas_kr = [INTERIOR_AREAS_KR[area] for area in INTERIOR_AREAS]
-    exterior_areas_kr = [EXTERIOR_AREAS_KR[area] for area in EXTERIOR_AREAS]
-    all_areas_kr = interior_areas_kr + exterior_areas_kr
-
-    # Extract contamination type lists
-    interior_contamination_types = list(interior_items.keys())
-    exterior_contamination_types = list(exterior_items.keys())
+    interior_areas_present = [area for area in interior_area_order if area in interior_guidelines]
+    exterior_areas_present = [area for area in exterior_area_order if area in exterior_guidelines]
+    all_areas_kr = interior_areas_present + exterior_areas_present
 
     # Extract severity levels from the data (use exact column names)
     severity_levels = set()
@@ -370,85 +358,131 @@ def generate_prompt_template(
 
     # Build vehicle areas section
     vehicle_areas_parts = []
-    if interior_areas_kr:
-        vehicle_areas_parts.append(f"**내부 영역**: {', '.join(interior_areas_kr)}")
-    if exterior_areas_kr:
-        vehicle_areas_parts.append(f"**외부 영역**: {', '.join(exterior_areas_kr)}")
+    if interior_areas_present:
+        vehicle_areas_parts.append(f"**내부 영역**: {', '.join(interior_areas_present)}")
+    if exterior_areas_present:
+        vehicle_areas_parts.append(f"**외부 영역**: {', '.join(exterior_areas_present)}")
     vehicle_areas_section = "\n".join(vehicle_areas_parts)
 
     # Build contamination guidelines section
     guidelines_parts = []
 
-    if interior_items:
+    if interior_guidelines:
         guidelines_parts.append("## 내부 오염 가이드라인")
-        for idx, (contamination_type, severities) in enumerate(interior_items.items(), 1):
-            guidelines_parts.append(f"\n### {idx}. {contamination_type}")
-            for severity in severity_levels_list:
-                if severity in severities:
-                    guidelines_parts.append(f"**{severity}**: {severities[severity]}")
+        for area in interior_areas_present:
+            contaminants = interior_guidelines.get(area, {})
+            guidelines_parts.append(f"\n### {area}")
+            for contamination_type, severities in contaminants.items():
+                guidelines_parts.append(f"- **{contamination_type}**")
+                for severity in severity_levels_list:
+                    if severity in severities:
+                        guidelines_parts.append(f"  - **{severity}**: {severities[severity]}")
 
-    if exterior_items:
+    if exterior_guidelines:
         if guidelines_parts:
             guidelines_parts.append("")
         guidelines_parts.append("## 외부 오염 가이드라인")
-        for idx, (contamination_type, severities) in enumerate(exterior_items.items(), 1):
-            guidelines_parts.append(f"\n### {idx}. {contamination_type}")
-            for severity in severity_levels_list:
-                if severity in severities:
-                    guidelines_parts.append(f"**{severity}**: {severities[severity]}")
+        for area in exterior_areas_present:
+            contaminants = exterior_guidelines.get(area, {})
+            guidelines_parts.append(f"\n### {area}")
+            for contamination_type, severities in contaminants.items():
+                guidelines_parts.append(f"- **{contamination_type}**")
+                for severity in severity_levels_list:
+                    if severity in severities:
+                        guidelines_parts.append(f"  - **{severity}**: {severities[severity]}")
 
     contamination_guidelines = "\n".join(guidelines_parts)
 
     # Build contamination types section
     contamination_types_parts = []
-    if interior_contamination_types:
+    if interior_guidelines:
         contamination_types_parts.append("**내부:**")
-        for ctype in interior_contamination_types:
-            contamination_types_parts.append(f"- {ctype}")
+        for area in interior_areas_present:
+            types_list = ", ".join(interior_guidelines[area].keys())
+            contamination_types_parts.append(f"- {area}: {types_list}")
         contamination_types_parts.append("- 깨끗함 (오염 없음)")
 
-    if exterior_contamination_types:
+    if exterior_guidelines:
         if contamination_types_parts:
             contamination_types_parts.append("")
         contamination_types_parts.append("**외부:**")
-        for ctype in exterior_contamination_types:
-            contamination_types_parts.append(f"- {ctype}")
+        for area in exterior_areas_present:
+            types_list = ", ".join(exterior_guidelines[area].keys())
+            contamination_types_parts.append(f"- {area}: {types_list}")
         contamination_types_parts.append("- 깨끗함 (오염 없음)")
 
     contamination_types_section = "\n".join(contamination_types_parts)
 
     # Build area evaluation section
     area_eval_parts = []
-    if interior_areas_kr:
-        area_eval_parts.append(f"   - 내부 이미지의 경우, 다음을 모두 평가: {', '.join(interior_areas_kr)}")
-    if exterior_areas_kr:
-        area_eval_parts.append(f"   - 외부 이미지의 경우, 다음을 모두 평가: {', '.join(exterior_areas_kr)}")
+    if interior_areas_present:
+        area_eval_parts.append(f"   - 내부 이미지의 경우, 다음을 모두 평가: {', '.join(interior_areas_present)}")
+    if exterior_areas_present:
+        area_eval_parts.append(f"   - 외부 이미지의 경우, 다음을 모두 평가: {', '.join(exterior_areas_present)}")
     area_evaluation_section = "\n".join(area_eval_parts)
 
     # Build severity levels section (use exact column names)
+    severity_samples = severity_levels_list or ["Level 1"]
     severity_parts = []
-    for severity in severity_levels_list:
+    for severity in severity_samples:
         severity_parts.append(f"   - **{severity}**")
     severity_levels_section = "\n".join(severity_parts)
 
+    # Prepare area name strings for template examples
+    area_names_choice = '" | "'.join(all_areas_kr) if all_areas_kr else "부위명"
+    area_name_examples = '", "'.join(all_areas_kr) if all_areas_kr else '운전석", "조수석'
+
+    # Example contamination types bound to actual areas (fallback to generic label)
+    def _first_area_with_data(area_order: list[str], guidelines: dict[str, dict[str, dict[str, str]]]) -> str:
+        for area in area_order:
+            if guidelines.get(area):
+                return area
+        return "내부 부위"
+
+    def _first_two_types(area: str, guidelines: dict[str, dict[str, dict[str, str]]]) -> tuple[str, str]:
+        types_list = list(guidelines.get(area, {}).keys())
+        if not types_list:
+            return ("오염항목", "오염항목")
+        if len(types_list) == 1:
+            return (types_list[0], types_list[0])
+        return (types_list[0], types_list[1])
+
+    example_interior_area_1 = _first_area_with_data(interior_areas_present, interior_guidelines)
+    example_interior_area_2 = (
+        _first_area_with_data(interior_areas_present[1:], interior_guidelines)
+        if len(interior_areas_present) > 1
+        else example_interior_area_1
+    )
+    example_interior_type_primary, example_interior_type_secondary = _first_two_types(
+        example_interior_area_1, interior_guidelines
+    )
+
+    # Pick example severities to keep JSON examples in sync with the CSV
+    example_severity_primary = severity_samples[0]
+    example_severity_secondary = severity_samples[1] if len(severity_samples) > 1 else example_severity_primary
+    example_severity_tertiary = severity_samples[2] if len(severity_samples) > 2 else example_severity_secondary
+    severity_levels_value = '" | "'.join(severity_levels_list or severity_samples)
+
     # Create template and format with data
     prompt_template = _create_prompt_template()
-
-    # Get example contamination types for examples
-    example_interior_type = interior_contamination_types[0] if interior_contamination_types else "오염항목"
-    example_exterior_type = exterior_contamination_types[0] if exterior_contamination_types else "오염항목"
 
     # Format the prompt
     formatted_prompt = prompt_template.format(
         vehicle_areas_section=vehicle_areas_section,
         contamination_guidelines=contamination_guidelines,
         contamination_types_section=contamination_types_section,
-        area_names='" | "'.join(all_areas_kr),
+        area_names=area_names_choice,
+        area_name_examples=area_name_examples,
         area_evaluation_section=area_evaluation_section,
         severity_levels_section=severity_levels_section,
-        severity_levels='" | "'.join(severity_levels_list),
-        example_interior_type=example_interior_type,
-        example_exterior_type=example_exterior_type,
+        severity_levels=severity_levels_value,
+        example_interior_area_1=example_interior_area_1,
+        example_interior_area_2=example_interior_area_2,
+        example_interior_type_primary=example_interior_type_primary,
+        example_interior_type_secondary=example_interior_type_secondary,
+        example_severity_primary=example_severity_primary,
+        example_severity_secondary=example_severity_secondary,
+        example_severity_tertiary=example_severity_tertiary,
     )
 
     return formatted_prompt
