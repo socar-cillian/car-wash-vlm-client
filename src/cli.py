@@ -43,7 +43,7 @@ def _get_api_url(internal: bool, model: str) -> str:
         return f"http://{service_name}.{namespace}.svc.cluster.local:8000/v1/chat/completions"
     else:
         # External URL
-        return "https://vllm.mlops.socarcorp.co.kr/v1/chat/completions"
+        return "https://vllm-test.mlops.socarcorp.co.kr/v1/chat/completions"
 
 
 @app.command("infer")
