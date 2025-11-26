@@ -226,17 +226,15 @@ def batch_inference(
     console.print(f"[green]✓ Server is healthy (response time: {health_result['response_time']:.2f}s)[/green]")
     console.print()
 
-    # Get max_model_len from server if max_tokens not specified
+    # Get max_model_len from server for display
     model_info = temp_client.get_model_info()
-    server_max_tokens = model_info.get("max_model_len") if model_info else None
+    server_max_model_len = model_info.get("max_model_len") if model_info else None
 
+    # If max_tokens not specified, use a reasonable default (not max_model_len!)
+    # max_model_len is total context (input + output), so we can't use it all for output
     if max_tokens is None:
-        if server_max_tokens:
-            max_tokens = server_max_tokens
-            console.print(f"[cyan]ℹ️  Using server's max_model_len: {max_tokens}[/cyan]")
-        else:
-            max_tokens = 8192  # fallback default
-            console.print(f"[yellow]⚠️  Could not get max_model_len from server, using default: {max_tokens}[/yellow]")
+        max_tokens = 1000  # reasonable default for output tokens
+        console.print(f"[cyan]ℹ️  Using default max_tokens: {max_tokens}[/cyan]")
         console.print()
 
     # Display configuration in a table
@@ -250,7 +248,9 @@ def batch_inference(
     config_table.add_row("💾 Output CSV", str(output))
     config_table.add_row("🌐 API URL", api_url)
     config_table.add_row("🤖 Model", model)
-    config_table.add_row("🔢 Max Tokens", str(max_tokens))
+    if server_max_model_len:
+        config_table.add_row("📏 Max Model Len", f"{server_max_model_len} (input + output)")
+    config_table.add_row("🔢 Max Tokens", f"{max_tokens} (output)")
     config_table.add_row("⚡ Workers", str(max_workers))
     if limit:
         config_table.add_row("📊 Limit", str(limit))
