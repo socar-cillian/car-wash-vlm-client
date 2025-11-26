@@ -150,7 +150,9 @@ def batch_inference(
         typer.Option(help="VLM API endpoint URL (overrides --internal)"),
     ] = None,
     model: Annotated[str, typer.Option(help="Model name")] = "qwen3-vl-8b-instruct",
-    max_tokens: Annotated[int, typer.Option(help="Maximum tokens to generate")] = 1000,
+    max_tokens: Annotated[
+        int | None, typer.Option(help="Maximum tokens to generate (default: server's max_model_len)")
+    ] = None,
     temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
     limit: Annotated[int | None, typer.Option(help="Maximum number of images to process (default: all)")] = None,
     max_workers: Annotated[int, typer.Option(help="Number of parallel workers (default: 4)")] = 4,
@@ -212,6 +214,31 @@ def batch_inference(
     if api_url is None:
         api_url = _get_api_url(internal, model)
 
+    # Get model info from server to determine max_tokens if not specified
+    console.print("Checking server health...")
+    temp_client = VLMClient(api_url=api_url, model=model)
+    health_result = temp_client.check_health(timeout=10)
+
+    if not health_result["healthy"]:
+        console.print(f"[red]❌ Server health check failed: {health_result['error']}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[green]✓ Server is healthy (response time: {health_result['response_time']:.2f}s)[/green]")
+    console.print()
+
+    # Get max_model_len from server if max_tokens not specified
+    model_info = temp_client.get_model_info()
+    server_max_tokens = model_info.get("max_model_len") if model_info else None
+
+    if max_tokens is None:
+        if server_max_tokens:
+            max_tokens = server_max_tokens
+            console.print(f"[cyan]ℹ️  Using server's max_model_len: {max_tokens}[/cyan]")
+        else:
+            max_tokens = 8192  # fallback default
+            console.print(f"[yellow]⚠️  Could not get max_model_len from server, using default: {max_tokens}[/yellow]")
+        console.print()
+
     # Display configuration in a table
     config_table = Table(title="⚙️  Configuration", show_header=False, box=None)
     config_table.add_column("Key", style="cyan", width=20)
@@ -223,9 +250,10 @@ def batch_inference(
     config_table.add_row("💾 Output CSV", str(output))
     config_table.add_row("🌐 API URL", api_url)
     config_table.add_row("🤖 Model", model)
+    config_table.add_row("🔢 Max Tokens", str(max_tokens))
     config_table.add_row("⚡ Workers", str(max_workers))
     if limit:
-        config_table.add_row("🔢 Limit", str(limit))
+        config_table.add_row("📊 Limit", str(limit))
 
     console.print(config_table)
     console.print()

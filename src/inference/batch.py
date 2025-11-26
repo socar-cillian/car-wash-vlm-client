@@ -482,20 +482,6 @@ def run_batch_inference(
     # Initialize client
     client = VLMClient(api_url=api_url, model=model)
 
-    # Check server health before proceeding
-    print("Checking server health...")
-    health_result = client.check_health(timeout=10)
-
-    if not health_result["healthy"]:
-        error_msg = f"Server health check failed: {health_result['error']}"
-        print(f"❌ {error_msg}")
-        raise ConnectionError(error_msg)
-
-    print(f"✓ Server is healthy (response time: {health_result['response_time']:.2f}s)")
-    if health_result.get("endpoint"):
-        print(f"  Health endpoint: {health_result['endpoint']}")
-    print()
-
     # Extract prompt version from filename
     prompt_version = prompt_path.stem
 

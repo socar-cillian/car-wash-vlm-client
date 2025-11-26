@@ -105,6 +105,27 @@ class VLMClient:
                 "response_time": response_time,
             }
 
+    def get_model_info(self, timeout: int = 10) -> dict | None:
+        """
+        Get model information including max_model_len from the server.
+
+        Args:
+            timeout: Timeout in seconds for the request
+
+        Returns:
+            Dictionary with model info or None if request fails
+        """
+        try:
+            base_url = self.api_url.rsplit("/v1/", 1)[0] if "/v1/" in self.api_url else self.api_url
+            response = self.session.get(f"{base_url}/v1/models", timeout=timeout)
+            if response.status_code == 200:
+                data = response.json()
+                if "data" in data and len(data["data"]) > 0:
+                    return data["data"][0]
+            return None
+        except Exception:
+            return None
+
     def _load_prompt(self, prompt_input: str) -> str:
         """Load prompt from text file or use as direct string."""
         # Check if it's a very long string (likely already loaded prompt text)
