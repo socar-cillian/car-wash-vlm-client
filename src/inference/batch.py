@@ -493,11 +493,21 @@ def run_batch_inference(
         reader = csv.DictReader(f)
         input_csv_columns = reader.fieldnames or []
         for row in reader:
-            # Get file_name - try multiple column names: file_name, filename
-            file_name = row.get("file_name") or row.get("filename", "")
+            # Get file_name - try multiple column names: file_name, image_name, filename
+            # image_name is preferred as it's the pure filename
+            # filename may contain path like /000565/56542/202511/uuid.jpg
+            file_name = row.get("file_name") or row.get("image_name", "")
 
-            # If file_name is a path (contains /), extract just the filename
-            if file_name and "/" in file_name:
+            # If not found, try filename and extract just the filename from path
+            if not file_name:
+                filename_val = row.get("filename", "")
+                if filename_val and ("/" in filename_val or "\\" in filename_val):
+                    file_name = Path(filename_val).name
+                else:
+                    file_name = filename_val
+
+            # Safety: if file_name is still a path, extract just the filename
+            if file_name and ("/" in file_name or "\\" in file_name):
                 file_name = Path(file_name).name
 
             if not file_name:
