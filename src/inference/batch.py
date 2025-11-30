@@ -493,8 +493,12 @@ def run_batch_inference(
         reader = csv.DictReader(f)
         input_csv_columns = reader.fieldnames or []
         for row in reader:
-            # Get file_name - if not present, try to extract from file_url or image_url
-            file_name = row.get("file_name", "")
+            # Get file_name - try multiple column names: file_name, filename
+            file_name = row.get("file_name") or row.get("filename", "")
+
+            # If file_name is a path (contains /), extract just the filename
+            if file_name and "/" in file_name:
+                file_name = Path(file_name).name
 
             if not file_name:
                 # Try file_url first, then image_url
@@ -502,7 +506,9 @@ def run_batch_inference(
                 if url:
                     parsed = urlparse(url)
                     file_name = Path(parsed.path).name
-                    row["file_name"] = file_name
+
+            if file_name:
+                row["file_name"] = file_name
 
             if file_name:
                 # Store all columns from the original CSV
