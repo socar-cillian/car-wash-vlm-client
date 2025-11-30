@@ -205,9 +205,11 @@ def batch_inference(
         console.print(f"[red]❌ Error: Prompt file not found: {prompt}[/red]")
         raise typer.Exit(1)
 
-    # Auto-generate output path: results/{prompt_name}_result.csv
-    prompt_name = prompt.stem  # e.g., "promptv4" from "promptv4.txt"
-    output = Path("results") / f"{prompt_name}_result.csv"
+    # Auto-generate output path: results/{dataset_name}_{prompt_name}_result.csv
+    prompt_name = prompt.stem  # e.g., "prompt_v4" from "prompt_v4.txt"
+    # Extract dataset name from images_dir (parent folder of 'images' or the folder itself)
+    dataset_name = images_dir.parent.name if images_dir.name == "images" else images_dir.name
+    output = Path("results") / f"{dataset_name}_{prompt_name}_result.csv"
     output.parent.mkdir(parents=True, exist_ok=True)
 
     # Determine API URL
