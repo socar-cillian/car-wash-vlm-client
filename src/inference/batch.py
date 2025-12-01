@@ -497,6 +497,12 @@ def run_batch_inference(
             file_name = row.get("file_name") or row.get("image_name", "")
 
             if not file_name:
+                # Try filename column (may contain path like /000565/56542/202511/uuid.jpg)
+                filename_val = row.get("filename", "")
+                if filename_val:
+                    file_name = Path(filename_val).name
+
+            if not file_name:
                 # Try file_url first, then image_url
                 url = row.get("file_url") or row.get("image_url")
                 if url:
