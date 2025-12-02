@@ -641,8 +641,10 @@ def run_batch_inference(
     fieldnames = list(input_csv_columns)
 
     # Add inference result columns (v4.1 format)
+    # Note: 'label' column from input CSV is preserved in input_csv_columns
     inference_columns = [
         "image_name",
+        "label",  # Include label column for evaluation
         "model",
         "prompt_version",
         "latency_seconds",
