@@ -11,7 +11,7 @@ from rich.table import Table
 
 from src.api import VLMClient
 from src.inference import run_batch_inference
-from src.prompts import generate_prompt_template_v4, parse_guideline_v4
+from src.prompts import generate_prompt, parse_guideline
 
 
 console = Console()
@@ -359,58 +359,72 @@ def batch_inference(
 
 
 @app.command("generate-prompt")
-def generate_prompt(
-    guideline: Annotated[Path, typer.Argument(help="Path to guideline CSV file")],
-    output: Annotated[Path | None, typer.Argument(help="Output prompt file path (optional)")] = None,
-):
-    """Generate prompt template from guideline CSV."""
-    typer.echo("=" * 60)
-    typer.echo("Prompt Generation")
-    typer.echo("=" * 60)
+def generate_prompt_cmd():
+    """Generate prompt template from guideline CSV and car parts CSV."""
+    console.print(Panel.fit("📝 Prompt Generation", style="bold magenta"))
+    console.print()
 
-    # Validate guideline path
+    # Interactive input for guideline path
+    guideline_str = Prompt.ask("[cyan]📄 Guideline CSV file path[/cyan]")
+    guideline = Path(guideline_str)
+
     if not guideline.exists():
-        typer.echo(f"Error: Guideline file not found: {guideline}", err=True)
+        console.print(f"[red]❌ Error: Guideline file not found: {guideline}[/red]")
         raise typer.Exit(1)
 
+    # Interactive input for car parts path
+    car_parts_str = Prompt.ask("[cyan]🚗 Car parts CSV file path[/cyan]")
+    car_parts = Path(car_parts_str) if car_parts_str.strip() else None
+
+    if car_parts and not car_parts.exists():
+        console.print(f"[red]❌ Error: Car parts file not found: {car_parts}[/red]")
+        raise typer.Exit(1)
+
+    # Interactive input for output path (optional)
+    output_str = Prompt.ask("[cyan]💾 Output file path (press Enter for auto)[/cyan]", default="")
+    output = Path(output_str) if output_str.strip() else None
+
+    console.print()
+
     try:
-        # Step 1: Parse guideline
-        typer.echo("\nStep 1: Parsing guideline CSV")
-        typer.echo("-" * 60)
-        parsed_rows = parse_guideline_v4(guideline)
-        typer.echo(f"Parsed {len(parsed_rows)} guideline entries")
+        # Step 1: Parse guideline and car parts
+        console.print("[bold]Step 1:[/bold] Parsing CSV files")
+        console.print("-" * 60)
+        parsed_rows, area_to_sub_areas = parse_guideline(guideline, car_parts)
+        console.print(f"  Parsed [green]{len(parsed_rows)}[/green] guideline entries")
+        if area_to_sub_areas:
+            console.print(f"  Parsed [green]{len(area_to_sub_areas)}[/green] areas with sub-areas")
 
         # Step 2: Generate prompt
-        typer.echo("\nStep 2: Generating prompt template")
-        typer.echo("-" * 60)
-        prompt = generate_prompt_template_v4(parsed_rows)
-        typer.echo("Prompt generated successfully")
+        console.print()
+        console.print("[bold]Step 2:[/bold] Generating prompt template")
+        console.print("-" * 60)
+        prompt_text = generate_prompt(parsed_rows, area_to_sub_areas)
+        console.print("  [green]✓[/green] Prompt generated successfully")
 
         # Determine output path based on guideline version
         if output is None:
-            # Extract version from guideline filename (e.g., guideline_v4.csv -> v4)
-            guideline_stem = guideline.stem  # e.g., "guideline_v4"
+            guideline_stem = guideline.stem
             version_str = guideline_stem.split("_v")[1] if "_v" in guideline_stem else "4"
-
             prompts_dir = guideline.parent.parent / "prompts"
             prompts_dir.mkdir(exist_ok=True)
             output = prompts_dir / f"prompt_v{version_str}.txt"
 
         # Step 3: Save prompt
-        typer.echo("\nStep 3: Saving prompt")
-        typer.echo("-" * 60)
+        console.print()
+        console.print("[bold]Step 3:[/bold] Saving prompt")
+        console.print("-" * 60)
         output.parent.mkdir(parents=True, exist_ok=True)
         with open(output, "w", encoding="utf-8") as f:
-            f.write(prompt)
-        typer.echo(f"Prompt saved to: {output}")
+            f.write(prompt_text)
+        console.print(f"  [green]✓[/green] Saved to: {output}")
 
-        typer.echo("\n" + "=" * 60)
-        typer.echo("✓ Prompt generation completed successfully!")
-        typer.echo("=" * 60)
-        typer.echo(f"\nGenerated file: {output}")
+        console.print()
+        console.print(Panel.fit("✓ Prompt generation completed!", style="bold green"))
+        console.print(f"\n[cyan]Generated file:[/cyan] {output}")
 
     except Exception as e:
-        typer.echo(f"Error: {e}", err=True)
+        console.print(f"[red]❌ Error: {e}[/red]")
         import traceback
 
         traceback.print_exc()

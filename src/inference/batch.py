@@ -14,8 +14,11 @@ from src.api import VLMClient
 
 # Fixed vehicle areas (Korean)
 INTERIOR_AREAS = ["운전석", "조수석", "컵홀더", "뒷좌석"]
-EXTERIOR_AREAS = ["전면", "조수석_방향", "운전석_방향", "후면"]
+EXTERIOR_AREAS = ["전면", "조수석 방향", "운전석 방향", "후면"]
 ALL_AREAS = INTERIOR_AREAS + EXTERIOR_AREAS
+
+# Valid severity levels
+SEVERITY_LEVELS = ["Level 0", "Level 1", "Level 2", "Level 3", "Level 4"]
 
 
 def load_prompt(prompt_path: Path) -> str:
@@ -247,8 +250,8 @@ def process_image(
 
 def create_csv_row(image_path: Path, inference_result: dict, model_name: str, prompt_version: str = "") -> dict:
     """
-    Create a CSV row from inference result in v3 format.
-    Extracts contamination data from areas array and formats in Korean.
+    Create a CSV row from inference result.
+    Supports new v4.1 format with area_name, sub_area, and contaminations array.
 
     Args:
         image_path: Path to image file
@@ -269,94 +272,86 @@ def create_csv_row(image_path: Path, inference_result: dict, model_name: str, pr
 
     if not inference_result["success"]:
         row["error"] = inference_result.get("error", "unknown_error")
-        row["classification"] = ""
-        row["contamination_types"] = ""
-        row["contamination_parts"] = ""
-        row["severity_level"] = ""
+        row["image_type"] = ""
+        row["area_name"] = ""
+        row["sub_area"] = ""
+        row["contamination_type"] = ""
+        row["severity"] = ""
         row["is_in_guideline"] = ""
+        row["max_severity"] = ""
         row["raw_response"] = ""
         return row
 
     result = inference_result.get("result", {})
 
-    # Extract areas array
+    # Extract image_type
+    row["image_type"] = result.get("image_type", "")
+
+    # Extract areas array (new format)
     areas = result.get("areas", [])
 
-    # Determine classification based on whether there are contaminated areas
-    if areas:
-        row["classification"] = "오염"  # Contaminated
-    else:
-        row["classification"] = "청결"  # Clean
-
-    # Extract contamination types from all areas
-    contamination_types_set = set()
-    contamination_parts_set = set()
-    severity_levels = []
-    has_non_guideline = False
+    # Flatten areas into rows - collect all contaminations
+    all_contaminations = []
+    max_severity_level = -1
+    max_severity_str = "Level 0"
 
     for area in areas:
-        # Add contamination type if present and not "깨끗함"
-        cont_type = area.get("contamination_type", "")
-        if cont_type and cont_type != "깨끗함":
-            contamination_types_set.add(cont_type)
-
-        # Add area name (contamination part)
         area_name = area.get("area_name", "")
-        if area_name:
-            contamination_parts_set.add(area_name)
+        sub_area = area.get("sub_area", "")
 
-        # Collect severity levels
-        severity = area.get("severity", "")
-        if severity and severity != "깨끗함":
-            severity_levels.append(severity)
+        # New format: contaminations is an array
+        contaminations = area.get("contaminations", [])
 
-        # Check if any contamination is not in guideline
-        # Validate area name against guideline areas (override VLM's is_in_guideline if needed)
-        if area_name and area_name not in ALL_AREAS:
-            # Area name not in guideline - mark as non-guideline regardless of VLM response
-            has_non_guideline = True
-        elif not area.get("is_in_guideline", True):
-            # VLM explicitly marked as not in guideline
-            has_non_guideline = True
+        for contamination in contaminations:
+            cont_type = contamination.get("contamination_type", "")
+            severity = contamination.get("severity", "Level 0")
+            is_in_guideline = contamination.get("is_in_guideline", True)
 
-    # Convert sets to comma-separated strings
-    row["contamination_types"] = ", ".join(sorted(contamination_types_set)) if contamination_types_set else ""
-    row["contamination_parts"] = ", ".join(sorted(contamination_parts_set)) if contamination_parts_set else ""
+            all_contaminations.append(
+                {
+                    "area_name": area_name,
+                    "sub_area": sub_area,
+                    "contamination_type": cont_type,
+                    "severity": severity,
+                    "is_in_guideline": is_in_guideline,
+                }
+            )
 
-    # Determine overall severity level (use the most severe)
-    # Priority: 즉시 조치 (Level 3) > 관리 권장 (Level 2) > 청결 유지/현상 유지 (Level 1)
-    severity_priority = {
-        "즉시 조치 (Level 3)": 3,
-        "관리 권장 (Level 2)": 2,
-        "청결 유지 (Level 1)": 1,
-        "현상 유지 (Level 1)": 1,
-        "긴급/전문 관리 (Level 4)": 4,
-    }
+            # Track max severity (Level 0 ~ Level 4)
+            try:
+                level_num = int(severity.replace("Level ", ""))
+                if level_num > max_severity_level:
+                    max_severity_level = level_num
+                    max_severity_str = severity
+            except (ValueError, AttributeError):
+                pass
 
-    max_severity = None
-    max_priority = 0
-
-    for sev in severity_levels:
-        # Find matching severity level with level number
-        for key, priority in severity_priority.items():
-            if key in sev or sev in key:
-                if priority > max_priority:
-                    max_priority = priority
-                    max_severity = key
-                break
-
-    row["severity_level"] = max_severity if max_severity else ""
-
-    # Set is_in_guideline column
-    # If there are contaminations and any is not in guideline, mark as False
-    # If there are contaminations and all are in guideline, mark as True
-    # If there are no contaminations (clean), leave empty
-    if areas:
-        row["is_in_guideline"] = "가이드라인 외" if has_non_guideline else "가이드라인 내"
-    else:
+    # If no contaminations found, use empty values
+    if not all_contaminations:
+        row["area_name"] = ""
+        row["sub_area"] = ""
+        row["contamination_type"] = ""
+        row["severity"] = ""
         row["is_in_guideline"] = ""
+        row["max_severity"] = "Level 0"
+        row["raw_response"] = str(result)
+        return row
 
-    # Add raw response for debugging
+    # Aggregate all contaminations into comma-separated strings
+    area_names = sorted({c["area_name"] for c in all_contaminations if c["area_name"]})
+    sub_areas = sorted({c["sub_area"] for c in all_contaminations if c["sub_area"]})
+    cont_types = sorted({c["contamination_type"] for c in all_contaminations if c["contamination_type"]})
+    severities = sorted({c["severity"] for c in all_contaminations if c["severity"]})
+
+    # Check if any contamination is not in guideline
+    has_non_guideline = any(not c["is_in_guideline"] for c in all_contaminations)
+
+    row["area_name"] = ", ".join(area_names)
+    row["sub_area"] = ", ".join(sub_areas)
+    row["contamination_type"] = ", ".join(cont_types)
+    row["severity"] = ", ".join(severities)
+    row["is_in_guideline"] = "N" if has_non_guideline else "Y"
+    row["max_severity"] = max_severity_str
     row["raw_response"] = str(result)
 
     return row
@@ -568,10 +563,12 @@ def run_batch_inference(
                     "latency_seconds": "0.000",
                     "success": False,
                     "error": "file_not_found",
-                    "classification": "",
-                    "contamination_types": "",
-                    "contamination_parts": "",
-                    "severity_level": "",
+                    "image_type": "",
+                    "area_name": "",
+                    "sub_area": "",
+                    "contamination_type": "",
+                    "severity": "",
+                    "max_severity": "",
                     "is_in_guideline": "",
                     "raw_response": "",
                 }
@@ -625,10 +622,12 @@ def run_batch_inference(
                         "latency_seconds": "0.000",
                         "success": False,
                         "error": str(e),
-                        "classification": "",
-                        "contamination_types": "",
-                        "contamination_parts": "",
-                        "severity_level": "",
+                        "image_type": "",
+                        "area_name": "",
+                        "sub_area": "",
+                        "contamination_type": "",
+                        "severity": "",
+                        "max_severity": "",
                         "is_in_guideline": "",
                         "raw_response": "",
                     }
@@ -641,7 +640,7 @@ def run_batch_inference(
     # Start with original CSV columns
     fieldnames = list(input_csv_columns)
 
-    # Add inference result columns (v3 format)
+    # Add inference result columns (v4.1 format)
     inference_columns = [
         "image_name",
         "model",
@@ -649,10 +648,12 @@ def run_batch_inference(
         "latency_seconds",
         "success",
         "error",
-        "classification",
-        "contamination_types",
-        "contamination_parts",
-        "severity_level",
+        "image_type",
+        "area_name",
+        "sub_area",
+        "contamination_type",
+        "severity",
+        "max_severity",
         "is_in_guideline",
         "raw_response",
     ]
