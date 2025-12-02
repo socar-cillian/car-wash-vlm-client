@@ -11,7 +11,7 @@ from rich.table import Table
 
 from src.api import VLMClient
 from src.inference import run_batch_inference
-from src.prompts import generate_prompt_template, parse_guideline_v2
+from src.prompts import generate_prompt_template_v4, parse_guideline_v4
 
 
 console = Console()
@@ -38,12 +38,12 @@ def _get_api_url(internal: bool, model: str) -> str:
     if internal:
         # Internal Kubernetes service URL format: <service_name>.<namespace>.svc.cluster.local
         # Default to qwen3-vl-8b for now
-        service_name = "vllm-test-qwen3-vl-8b-engine-service"
-        namespace = "vllm-test"
+        service_name = "vllm-qwen3-vl-8b-engine-service"
+        namespace = "vllm"
         return f"http://{service_name}.{namespace}.svc.cluster.local:8000/v1/chat/completions"
     else:
         # External URL
-        return "https://vllm-test.mlops.socarcorp.co.kr/v1/chat/completions"
+        return "https://vllm.mlops.socarcorp.co.kr/v1/chat/completions"
 
 
 @app.command("infer")
@@ -360,11 +360,10 @@ def batch_inference(
 
 @app.command("generate-prompt")
 def generate_prompt(
-    guideline: Annotated[Path, typer.Argument(help="Path to guideline v2 CSV file")],
+    guideline: Annotated[Path, typer.Argument(help="Path to guideline CSV file")],
     output: Annotated[Path | None, typer.Argument(help="Output prompt file path (optional)")] = None,
-    template_version: Annotated[int, typer.Option("--template-version", help="Template version to use")] = 1,
 ):
-    """Generate prompt template from guideline v2 CSV."""
+    """Generate prompt template from guideline CSV."""
     typer.echo("=" * 60)
     typer.echo("Prompt Generation")
     typer.echo("=" * 60)
@@ -375,24 +374,23 @@ def generate_prompt(
         raise typer.Exit(1)
 
     try:
-        # Step 1: Parse guideline v2
-        typer.echo("\nStep 1: Parsing guideline v2 CSV")
+        # Step 1: Parse guideline
+        typer.echo("\nStep 1: Parsing guideline CSV")
         typer.echo("-" * 60)
-        parsed_rows = parse_guideline_v2(guideline)
+        parsed_rows = parse_guideline_v4(guideline)
         typer.echo(f"Parsed {len(parsed_rows)} guideline entries")
 
         # Step 2: Generate prompt
         typer.echo("\nStep 2: Generating prompt template")
         typer.echo("-" * 60)
-        typer.echo(f"Using template version: {template_version}")
-        prompt = generate_prompt_template(parsed_rows, template_version=template_version)
+        prompt = generate_prompt_template_v4(parsed_rows)
         typer.echo("Prompt generated successfully")
 
         # Determine output path based on guideline version
         if output is None:
-            # Extract version from guideline filename (e.g., guideline_v2.csv -> v2)
-            guideline_stem = guideline.stem  # e.g., "guideline_v2"
-            version_str = guideline_stem.split("_v")[1] if "_v" in guideline_stem else "1"
+            # Extract version from guideline filename (e.g., guideline_v4.csv -> v4)
+            guideline_stem = guideline.stem  # e.g., "guideline_v4"
+            version_str = guideline_stem.split("_v")[1] if "_v" in guideline_stem else "4"
 
             prompts_dir = guideline.parent.parent / "prompts"
             prompts_dir.mkdir(exist_ok=True)
