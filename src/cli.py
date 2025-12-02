@@ -16,6 +16,34 @@ from src.prompts import generate_prompt, parse_guideline
 
 console = Console()
 
+# Default base path for Kubernetes environment
+DEFAULT_BASE_PATH = Path("/home/jovyan")
+
+
+def _resolve_path(path_str: str) -> Path:
+    """
+    Resolve path with fallback to DEFAULT_BASE_PATH.
+
+    If the path doesn't exist, try prepending DEFAULT_BASE_PATH.
+
+    Args:
+        path_str: Path string from user input
+
+    Returns:
+        Resolved Path object
+    """
+    path = Path(path_str)
+    if path.exists():
+        return path
+
+    # Try with default base path
+    alt_path = DEFAULT_BASE_PATH / path_str.lstrip("/")
+    if alt_path.exists():
+        return alt_path
+
+    # Return original path (will fail validation later with proper error)
+    return path
+
 
 app = typer.Typer(
     name="car-contamination-classifier",
@@ -165,15 +193,15 @@ def batch_inference(
     if input_csv is None:
         console.print()
         input_csv_str = Prompt.ask("[cyan]📄 Input CSV file path[/cyan]")
-        input_csv = Path(input_csv_str)
+        input_csv = _resolve_path(input_csv_str)
 
     if images_dir is None:
         images_dir_str = Prompt.ask("[cyan]📁 Images directory path[/cyan]")
-        images_dir = Path(images_dir_str)
+        images_dir = _resolve_path(images_dir_str)
 
     if prompt is None:
         prompt_str = Prompt.ask("[cyan]📝 Prompt file path[/cyan]")
-        prompt = Path(prompt_str)
+        prompt = _resolve_path(prompt_str)
 
     # Ask for limit if not provided via CLI and in interactive mode
     if limit is None:
@@ -366,7 +394,7 @@ def generate_prompt_cmd():
 
     # Interactive input for guideline path
     guideline_str = Prompt.ask("[cyan]📄 Guideline CSV file path[/cyan]")
-    guideline = Path(guideline_str)
+    guideline = _resolve_path(guideline_str)
 
     if not guideline.exists():
         console.print(f"[red]❌ Error: Guideline file not found: {guideline}[/red]")
@@ -374,7 +402,7 @@ def generate_prompt_cmd():
 
     # Interactive input for car parts path
     car_parts_str = Prompt.ask("[cyan]🚗 Car parts CSV file path[/cyan]")
-    car_parts = Path(car_parts_str) if car_parts_str.strip() else None
+    car_parts = _resolve_path(car_parts_str) if car_parts_str.strip() else None
 
     if car_parts and not car_parts.exists():
         console.print(f"[red]❌ Error: Car parts file not found: {car_parts}[/red]")
@@ -382,7 +410,7 @@ def generate_prompt_cmd():
 
     # Interactive input for output path (optional)
     output_str = Prompt.ask("[cyan]💾 Output file path (press Enter for auto)[/cyan]", default="")
-    output = Path(output_str) if output_str.strip() else None
+    output = _resolve_path(output_str) if output_str.strip() else None
 
     console.print()
 
