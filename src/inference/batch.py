@@ -549,6 +549,7 @@ def run_batch_inference(
 
     # Add inference result columns (v4.1 format)
     inference_columns = [
+        "file_name",  # Added during CSV loading
         "image_name",
         "label",  # Include label column for evaluation
         "model",
@@ -584,137 +585,114 @@ def run_batch_inference(
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
         writer.writeheader()
 
-        # Use a single Progress context for both submitting and processing
-        with (
-            Progress(
-                TextColumn("[bold blue]{task.description}"),
-                BarColumn(),
-                TaskProgressColumn(),
-                TextColumn("•"),
-                TimeRemainingColumn(),
-                TextColumn("• {task.fields[status]}"),
-                refresh_per_second=30,  # Faster refresh for large datasets
-            ) as progress,
-            ThreadPoolExecutor(max_workers=max_workers) as executor,
-        ):
-            # Submit all tasks with progress
-            submit_task = progress.add_task("Submitting tasks", total=len(image_data), status="starting...")
-            progress.refresh()  # Force immediate render
+        # Filter valid images first
+        valid_images = []
+        for data in image_data:
+            file_name = data["file_name"]
+            image_path = images_dir / file_name
+            if not image_path.exists():
+                # Local file not found - write immediately and skip
+                row = {
+                    **data,
+                    "model": model,
+                    "prompt_version": prompt_version,
+                    "latency_seconds": "0.000",
+                    "success": False,
+                    "error": "file_not_found",
+                    "image_type": "",
+                    "area_name": "",
+                    "sub_area": "",
+                    "contamination_type": "",
+                    "severity": "",
+                    "max_severity": "",
+                    "is_in_guideline": "",
+                    "raw_response": "",
+                }
+                writer.writerow(row)
+                failed_count += 1
+            else:
+                valid_images.append((data, image_path))
 
-            # Update progress every N items for better performance with large datasets
-            update_interval = max(1, len(image_data) // 100)  # ~100 updates total
-            submitted_count = 0
+        # Process with progress bar
+        with Progress(
+            TextColumn("[bold blue]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("•"),
+            TimeRemainingColumn(),
+            TextColumn("• {task.fields[status]}"),
+            refresh_per_second=10,
+        ) as progress:
+            process_task = progress.add_task(
+                "Processing images", total=len(valid_images), status="starting..."
+            )
 
-            for data in image_data:
-                file_name = data["file_name"]
+            # Use executor.map for simpler concurrent processing
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
 
-                # Only use local files
-                image_path = images_dir / file_name
-                if not image_path.exists():
-                    # Local file not found - write immediately and skip
-                    row = {
-                        **data,  # Include all original CSV columns
-                        "model": model,
-                        "prompt_version": prompt_version,
-                        "latency_seconds": "0.000",
-                        "success": False,
-                        "error": "file_not_found",
-                        "image_type": "",
-                        "area_name": "",
-                        "sub_area": "",
-                        "contamination_type": "",
-                        "severity": "",
-                        "max_severity": "",
-                        "is_in_guideline": "",
-                        "raw_response": "",
-                    }
-                    writer.writerow(row)
-                    failed_count += 1
-                    submitted_count += 1
-                    if submitted_count % update_interval == 0:
-                        progress.update(submit_task, completed=submitted_count, status=f"skip: {file_name}")
-                    continue
+                def process_single(item):
+                    data, image_path = item
+                    return data, image_path, process_image(
+                        client,
+                        str(image_path),
+                        prompt,
+                        max_tokens,
+                        temperature,
+                        data["file_name"],
+                    )
 
-                # Use local file
-                image_source = str(image_path)
-                image_display_path = image_path
+                # Process results as they complete
+                for data, image_display_path, inference_result in executor.map(process_single, valid_images):
+                    try:
+                        row = create_csv_row(image_display_path, inference_result, model, prompt_version)
 
-                # Submit inference task
-                future = executor.submit(
-                    process_image,
-                    client,
-                    image_source,  # Can be URL string or local path string
-                    prompt,
-                    max_tokens,
-                    temperature,
-                    file_name,  # Pass filename for logging
-                )
-                futures_to_data[future] = (data, image_display_path)
-                submitted_count += 1
-                if submitted_count % update_interval == 0:
-                    progress.update(submit_task, completed=submitted_count, status=f"{file_name}")
+                        # Add all original CSV columns
+                        for col in input_csv_columns:
+                            if col not in row:
+                                row[col] = data.get(col, "")
 
-            # Final update to ensure 100%
-            progress.update(submit_task, completed=len(image_data), visible=False)
+                        # Write immediately to CSV (streaming write)
+                        writer.writerow(row)
 
-            # Process completed tasks with progress bar - write immediately to CSV
-            process_task = progress.add_task("Processing images", total=len(futures_to_data), status="")
+                        # Update counters
+                        latency = float(row["latency_seconds"])
+                        total_latency += latency
+                        if inference_result["success"]:
+                            successful_count += 1
+                            progress.update(
+                                process_task,
+                                advance=1,
+                                status=f"✓ {image_display_path.name} ({latency:.2f}s)",
+                            )
+                        else:
+                            failed_count += 1
+                            progress.update(process_task, advance=1, status=f"✗ {image_display_path.name}")
 
-            for future in as_completed(futures_to_data):
-                data, image_display_path = futures_to_data[future]
-
-                try:
-                    inference_result = future.result()
-                    row = create_csv_row(image_display_path, inference_result, model, prompt_version)
-
-                    # Add all original CSV columns
-                    for col in input_csv_columns:
-                        if col not in row:
-                            row[col] = data.get(col, "")
-
-                    # Write immediately to CSV (streaming write)
-                    writer.writerow(row)
-
-                    # Update counters
-                    latency = float(row["latency_seconds"])
-                    total_latency += latency
-                    if inference_result["success"]:
-                        successful_count += 1
-                        progress.update(
-                            process_task,
-                            advance=1,
-                            status=f"✓ {image_display_path.name} ({latency:.2f}s)",
-                        )
-                    else:
+                    except Exception as e:
+                        # Handle unexpected errors
+                        row = {
+                            **data,
+                            "model": model,
+                            "prompt_version": prompt_version,
+                            "latency_seconds": "0.000",
+                            "success": False,
+                            "error": str(e),
+                            "image_type": "",
+                            "area_name": "",
+                            "sub_area": "",
+                            "contamination_type": "",
+                            "severity": "",
+                            "max_severity": "",
+                            "is_in_guideline": "",
+                            "raw_response": "",
+                        }
+                        writer.writerow(row)
                         failed_count += 1
-                        progress.update(process_task, advance=1, status=f"✗ {image_display_path.name}")
+                        progress.update(process_task, advance=1, status=f"✗ {image_display_path.name} (error)")
 
-                except Exception as e:
-                    # Handle unexpected errors
-                    row = {
-                        **data,  # Include all original CSV columns
-                        "model": model,
-                        "prompt_version": prompt_version,
-                        "latency_seconds": "0.000",
-                        "success": False,
-                        "error": str(e),
-                        "image_type": "",
-                        "area_name": "",
-                        "sub_area": "",
-                        "contamination_type": "",
-                        "severity": "",
-                        "max_severity": "",
-                        "is_in_guideline": "",
-                        "raw_response": "",
-                    }
-                    # Write immediately to CSV (streaming write)
-                    writer.writerow(row)
-                    failed_count += 1
-                    progress.update(process_task, advance=1, status=f"✗ {image_display_path.name} (error)")
-
-                # Flush periodically to ensure data is written to disk
-                if (successful_count + failed_count) % 100 == 0:
-                    csv_file.flush()
+                    # Flush periodically
+                    if (successful_count + failed_count) % 100 == 0:
+                        csv_file.flush()
 
     # Calculate total processing time
     total_elapsed_time = time.time() - total_start_time
