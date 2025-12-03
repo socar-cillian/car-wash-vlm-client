@@ -601,6 +601,10 @@ def run_batch_inference(
             submit_task = progress.add_task("Submitting tasks", total=len(image_data), status="starting...")
             progress.refresh()  # Force immediate render
 
+            # Update progress every N items for better performance with large datasets
+            update_interval = max(1, len(image_data) // 100)  # ~100 updates total
+            submitted_count = 0
+
             for data in image_data:
                 file_name = data["file_name"]
 
@@ -626,7 +630,9 @@ def run_batch_inference(
                     }
                     writer.writerow(row)
                     failed_count += 1
-                    progress.update(submit_task, advance=1, status=f"skip: {file_name}")
+                    submitted_count += 1
+                    if submitted_count % update_interval == 0:
+                        progress.update(submit_task, completed=submitted_count, status=f"skip: {file_name}")
                     continue
 
                 # Use local file
@@ -644,10 +650,12 @@ def run_batch_inference(
                     file_name,  # Pass filename for logging
                 )
                 futures_to_data[future] = (data, image_display_path)
-                progress.update(submit_task, advance=1, status=f"{file_name}")
+                submitted_count += 1
+                if submitted_count % update_interval == 0:
+                    progress.update(submit_task, completed=submitted_count, status=f"{file_name}")
 
-            # Mark submit task as complete
-            progress.update(submit_task, visible=False)
+            # Final update to ensure 100%
+            progress.update(submit_task, completed=len(image_data), visible=False)
 
             # Process completed tasks with progress bar - write immediately to CSV
             process_task = progress.add_task("Processing images", total=len(futures_to_data), status="")
