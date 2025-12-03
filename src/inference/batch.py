@@ -593,12 +593,13 @@ def run_batch_inference(
                 TextColumn("•"),
                 TimeRemainingColumn(),
                 TextColumn("• {task.fields[status]}"),
-                refresh_per_second=10,
+                refresh_per_second=30,  # Faster refresh for large datasets
             ) as progress,
             ThreadPoolExecutor(max_workers=max_workers) as executor,
         ):
             # Submit all tasks with progress
-            submit_task = progress.add_task("Submitting tasks", total=len(image_data), status="")
+            submit_task = progress.add_task("Submitting tasks", total=len(image_data), status="starting...")
+            progress.refresh()  # Force immediate render
 
             for data in image_data:
                 file_name = data["file_name"]

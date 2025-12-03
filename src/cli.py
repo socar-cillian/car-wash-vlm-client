@@ -192,7 +192,7 @@ def batch_inference(
     ] = None,
     temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
     limit: Annotated[int | None, typer.Option(help="Maximum number of images to process (default: all)")] = None,
-    max_workers: Annotated[int, typer.Option(help="Number of parallel workers (default: 8)")] = 8,
+    max_workers: Annotated[int, typer.Option(help="Number of parallel workers (default: 4)")] = 4,
     internal: Annotated[bool, typer.Option("--internal", help="Use internal Kubernetes service URL")] = False,
 ):
     """Run batch inference on multiple images specified in CSV file."""
