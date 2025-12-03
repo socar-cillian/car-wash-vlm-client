@@ -451,7 +451,7 @@ def run_batch_inference(
     max_tokens: int,
     temperature: float,
     limit: int | None = None,
-    max_workers: int = 4,
+    max_workers: int = 16,
 ) -> dict:
     """
     Run batch inference on images specified in CSV file with parallel processing.

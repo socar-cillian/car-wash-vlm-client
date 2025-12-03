@@ -26,14 +26,19 @@ class VLMClient:
         self.api_url = api_url
         self.model = model
 
-        # Setup session with retry logic
+        # Setup session with retry logic and connection pooling for high throughput
         self.session = requests.Session()
         retry_strategy = Retry(
             total=3,  # Total number of retries
-            backoff_factor=1,  # Wait 1, 2, 4 seconds between retries
+            backoff_factor=0.5,  # Wait 0.5, 1, 2 seconds between retries (faster)
             status_forcelist=[500, 502, 503, 504],  # Retry on server errors
         )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
+        # Increase connection pool size for parallel requests
+        adapter = HTTPAdapter(
+            max_retries=retry_strategy,
+            pool_connections=32,  # Number of connection pools
+            pool_maxsize=32,  # Max connections per pool
+        )
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
 
