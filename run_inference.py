@@ -22,7 +22,7 @@ def main():
     prompt = prompt_path.read_text(encoding="utf-8")
 
     # Initialize client
-    api_url = "https://vllm.mlops.socarcorp.co.kr/v1/chat/completions"
+    api_url = "https://vllm-test.mlops.socarcorp.co.kr/v1/chat/completions"
     model = "qwen3-vl-8b-instruct"
 
     print(f"\n🔧 API: {api_url}")
