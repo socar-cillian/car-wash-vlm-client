@@ -131,6 +131,80 @@ class VLMClient:
         except Exception:
             return None
 
+    def get_server_replicas(self, namespace: str = "vllm-test", timeout: int = 5) -> int:
+        """
+        Get the number of available server replicas by querying Kubernetes endpoints.
+
+        This method tries multiple approaches:
+        1. Query Kubernetes API directly (if running inside K8s with proper RBAC)
+        2. Make multiple health checks to estimate available backends
+
+        Args:
+            namespace: Kubernetes namespace where vLLM is deployed
+            timeout: Timeout in seconds for each request
+
+        Returns:
+            Number of available replicas (minimum 1)
+        """
+        try:
+            # Method 1: Try to query Kubernetes API (works inside K8s with proper ServiceAccount)
+            import os
+
+            token_path = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+            ca_path = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+
+            if os.path.exists(token_path) and os.path.exists(ca_path):
+                with open(token_path) as f:
+                    token = f.read().strip()
+
+                k8s_host = os.environ.get("KUBERNETES_SERVICE_HOST", "kubernetes.default.svc")
+                k8s_port = os.environ.get("KUBERNETES_SERVICE_PORT", "443")
+
+                # Get deployment replicas
+                service_name = f"{namespace}-qwen3-vl-8b-engine-service"
+                endpoints_url = f"https://{k8s_host}:{k8s_port}/api/v1/namespaces/{namespace}/endpoints/{service_name}"
+
+                response = self.session.get(
+                    endpoints_url,
+                    headers={"Authorization": f"Bearer {token}"},
+                    verify=ca_path,
+                    timeout=timeout,
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    # Count addresses in all subsets
+                    total_addresses = 0
+                    for subset in data.get("subsets", []):
+                        total_addresses += len(subset.get("addresses", []))
+                    if total_addresses > 0:
+                        return total_addresses
+
+        except Exception:
+            pass
+
+        # Method 2: Fallback - assume 1 replica if we can reach the server
+        health = self.check_health(timeout=timeout)
+        return 1 if health.get("healthy") else 0
+
+    def get_recommended_workers(
+        self, namespace: str = "vllm-test", workers_per_replica: int = 4, timeout: int = 5
+    ) -> int:
+        """
+        Get the recommended number of workers based on server replicas.
+
+        Args:
+            namespace: Kubernetes namespace where vLLM is deployed
+            workers_per_replica: Number of workers to allocate per GPU/replica
+            timeout: Timeout in seconds for replica check
+
+        Returns:
+            Recommended number of workers (minimum 1)
+        """
+        replicas = self.get_server_replicas(namespace=namespace, timeout=timeout)
+        recommended = max(1, replicas * workers_per_replica)
+        return recommended
+
     def _load_prompt(self, prompt_input: str) -> str:
         """Load prompt from text file or use as direct string."""
         # Check if it's a very long string (likely already loaded prompt text)

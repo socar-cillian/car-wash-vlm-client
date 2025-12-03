@@ -192,7 +192,10 @@ def batch_inference(
     ] = None,
     temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
     limit: Annotated[int | None, typer.Option(help="Maximum number of images to process (default: all)")] = None,
-    max_workers: Annotated[int, typer.Option(help="Number of parallel workers (default: 4)")] = 4,
+    max_workers: Annotated[
+        int | None, typer.Option(help="Number of parallel workers (default: auto based on server replicas)")
+    ] = None,
+    workers_per_replica: Annotated[int, typer.Option(help="Workers per GPU replica for auto-scaling (default: 4)")] = 4,
     internal: Annotated[bool, typer.Option("--internal", help="Use internal Kubernetes service URL")] = False,
 ):
     """Run batch inference on multiple images specified in CSV file."""
@@ -286,6 +289,20 @@ def batch_inference(
     # Get max_model_len from server for display
     model_info = temp_client.get_model_info()
     server_max_model_len = model_info.get("max_model_len") if model_info else None
+
+    # Auto-detect server replicas and adjust workers if not specified
+    if max_workers is None:
+        console.print("[cyan]ℹ️  Auto-detecting server replicas...[/cyan]")
+        server_replicas = temp_client.get_server_replicas(namespace=namespace, timeout=5)
+        max_workers = temp_client.get_recommended_workers(
+            namespace=namespace, workers_per_replica=workers_per_replica, timeout=5
+        )
+        console.print(
+            f"[cyan]ℹ️  Detected {server_replicas} server replica(s) → using {max_workers} workers "
+            f"({workers_per_replica} per replica)[/cyan]"
+        )
+        console.print()
+        logger.info(f"Auto-detected {server_replicas} replicas, using {max_workers} workers")
 
     # If max_tokens not specified, use a reasonable default (not max_model_len!)
     # max_model_len is total context (input + output), so we can't use it all for output
