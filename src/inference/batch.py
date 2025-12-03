@@ -2,13 +2,12 @@
 
 import csv
 import json
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import urlparse
 
-from tqdm import tqdm
+from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeRemainingColumn
 
 from src.api import VLMClient
 
@@ -631,13 +630,17 @@ def run_batch_inference(
                 futures_to_data[future] = (data, image_display_path)
 
             # Process completed tasks with progress bar - write immediately to CSV
-            with tqdm(
-                total=len(futures_to_data),
-                desc="Processing images",
-                unit="img",
-                file=sys.stderr,
-                dynamic_ncols=True,
-            ) as pbar:
+            with Progress(
+                TextColumn("[bold blue]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                TextColumn("•"),
+                TimeRemainingColumn(),
+                TextColumn("• {task.fields[status]}"),
+                refresh_per_second=10,
+            ) as progress:
+                task = progress.add_task("Processing images", total=len(futures_to_data), status="")
+
                 for future in as_completed(futures_to_data):
                     data, image_display_path = futures_to_data[future]
 
@@ -658,10 +661,14 @@ def run_batch_inference(
                         total_latency += latency
                         if inference_result["success"]:
                             successful_count += 1
-                            pbar.set_postfix_str(f"✓ {image_display_path.name} ({latency:.2f}s)")
+                            progress.update(
+                                task,
+                                advance=1,
+                                status=f"✓ {image_display_path.name} ({latency:.2f}s)",
+                            )
                         else:
                             failed_count += 1
-                            pbar.set_postfix_str(f"✗ {image_display_path.name}")
+                            progress.update(task, advance=1, status=f"✗ {image_display_path.name}")
 
                     except Exception as e:
                         # Handle unexpected errors
@@ -684,9 +691,7 @@ def run_batch_inference(
                         # Write immediately to CSV (streaming write)
                         writer.writerow(row)
                         failed_count += 1
-                        pbar.set_postfix_str(f"✗ {image_display_path.name} (error)")
-
-                    pbar.update(1)
+                        progress.update(task, advance=1, status=f"✗ {image_display_path.name} (error)")
 
                     # Flush periodically to ensure data is written to disk
                     if (successful_count + failed_count) % 100 == 0:
