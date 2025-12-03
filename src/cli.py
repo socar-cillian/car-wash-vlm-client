@@ -65,9 +65,9 @@ def _get_api_url(internal: bool, model: str, namespace: str = "vllm-test") -> st
         Full API URL for the VLM service
     """
     if internal:
-        # Internal Kubernetes service URL format: <service_name>.<namespace>.svc.cluster.local
-        # Default to qwen3-vl-8b for now
-        service_name = "vllm-qwen3-vl-8b-engine-service"
+        # Internal K8s URL: <release>-<model>-engine-service.<namespace>.svc.cluster.local
+        # Release name matches namespace (vllm or vllm-test)
+        service_name = f"{namespace}-qwen3-vl-8b-engine-service"
         return f"http://{service_name}.{namespace}.svc.cluster.local:8000/v1/chat/completions"
     else:
         # External URL - use namespace to determine URL
