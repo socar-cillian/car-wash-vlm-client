@@ -52,13 +52,14 @@ app = typer.Typer(
 )
 
 
-def _get_api_url(internal: bool, model: str) -> str:
+def _get_api_url(internal: bool, model: str, namespace: str = "vllm-test") -> str:
     """
     Get the appropriate API URL based on whether running internally or externally.
 
     Args:
         internal: Whether running inside Kubernetes cluster
         model: Model name to determine the service
+        namespace: Kubernetes namespace (vllm or vllm-test)
 
     Returns:
         Full API URL for the VLM service
@@ -67,11 +68,13 @@ def _get_api_url(internal: bool, model: str) -> str:
         # Internal Kubernetes service URL format: <service_name>.<namespace>.svc.cluster.local
         # Default to qwen3-vl-8b for now
         service_name = "vllm-qwen3-vl-8b-engine-service"
-        namespace = "vllm"
         return f"http://{service_name}.{namespace}.svc.cluster.local:8000/v1/chat/completions"
     else:
-        # External URL
-        return "https://vllm-test.mlops.socarcorp.co.kr/v1/chat/completions"
+        # External URL - use namespace to determine URL
+        if namespace == "vllm":
+            return "https://vllm.mlops.socarcorp.co.kr/v1/chat/completions"
+        else:
+            return "https://vllm-test.mlops.socarcorp.co.kr/v1/chat/completions"
 
 
 @app.command("infer")
@@ -108,7 +111,7 @@ def single_inference(
 
     # Determine API URL
     if api_url is None:
-        api_url = _get_api_url(internal, model)
+        api_url = _get_api_url(internal, model, "vllm-test")
 
     # Initialize client
     typer.echo(f"API URL: {api_url}")
@@ -214,9 +217,16 @@ def batch_inference(
                 limit = None
 
     # Ask for internal mode if api_url is not provided
+    namespace = "vllm-test"  # default
     if api_url is None and not internal:
         internal_str = Prompt.ask("[cyan]🔧 Running inside Kubernetes cluster? (y/N)[/cyan]", default="N")
         internal = internal_str.strip().lower() in ["y", "yes"]
+
+    # Ask for namespace if api_url is not provided
+    if api_url is None:
+        namespace = Prompt.ask(
+            "[cyan]🏷️  Select namespace (vllm / vllm-test)[/cyan]", choices=["vllm", "vllm-test"], default="vllm-test"
+        )
 
     console.print()
 
@@ -242,7 +252,7 @@ def batch_inference(
 
     # Determine API URL
     if api_url is None:
-        api_url = _get_api_url(internal, model)
+        api_url = _get_api_url(internal, model, namespace)
 
     # Get model info from server to determine max_tokens if not specified
     console.print("Checking server health...")
