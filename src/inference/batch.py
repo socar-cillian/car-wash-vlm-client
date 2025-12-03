@@ -2,6 +2,7 @@
 
 import csv
 import json
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -630,7 +631,13 @@ def run_batch_inference(
                 futures_to_data[future] = (data, image_display_path)
 
             # Process completed tasks with progress bar - write immediately to CSV
-            with tqdm(total=len(futures_to_data), desc="Processing images", unit="img") as pbar:
+            with tqdm(
+                total=len(futures_to_data),
+                desc="Processing images",
+                unit="img",
+                file=sys.stderr,
+                dynamic_ncols=True,
+            ) as pbar:
                 for future in as_completed(futures_to_data):
                     data, image_display_path = futures_to_data[future]
 
