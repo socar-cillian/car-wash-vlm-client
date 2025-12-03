@@ -1,6 +1,7 @@
 """Integrated CLI for car contamination classification."""
 
 import sys
+import time
 from pathlib import Path
 from typing import Annotated
 
@@ -274,35 +275,57 @@ def batch_inference(
     if api_url is None:
         api_url = _get_api_url(internal, model, namespace)
 
-    # Get model info from server to determine max_tokens if not specified
+    # Check server health with cold start support (KEDA may have scaled to 0)
     console.print("Checking server health...")
     temp_client = VLMClient(api_url=api_url, model=model)
     health_result = temp_client.check_health(timeout=10)
 
     if not health_result["healthy"]:
-        console.print(f"[red]❌ Server health check failed: {health_result['error']}[/red]")
-        raise typer.Exit(1)
+        # Server might be scaled to 0, wait for cold start
+        console.print("[yellow]⏳ Server not ready (may be scaled to zero). Waiting for cold start...[/yellow]")
+        console.print("[yellow]   This can take 5-10 minutes for GPU pod startup + model loading[/yellow]")
+        logger.info("Server not ready, waiting for cold start...")
 
-    console.print(f"[green]✓ Server is healthy (response time: {health_result['response_time']:.2f}s)[/green]")
+        # Wait up to 15 minutes for cold start (GPU startup + model download + loading)
+        max_wait = 900  # 15 minutes
+        wait_interval = 30  # Check every 30 seconds
+        elapsed = 0
+
+        with console.status("[yellow]Waiting for server...[/yellow]") as status:
+            while elapsed < max_wait:
+                time.sleep(wait_interval)
+                elapsed += wait_interval
+                health_result = temp_client.check_health(timeout=30)
+
+                if health_result["healthy"]:
+                    console.print(f"\n[green]✓ Server is now ready after {elapsed}s![/green]")
+                    logger.info(f"Server ready after {elapsed}s cold start")
+                    break
+
+                status.update(f"[yellow]Waiting for server... ({elapsed}s / {max_wait}s)[/yellow]")
+                logger.info(f"Still waiting for server... {elapsed}s elapsed")
+            else:
+                console.print(f"\n[red]❌ Server did not become ready after {max_wait}s[/red]")
+                console.print("[red]   Check if GPU nodes are available and KEDA is working[/red]")
+                raise typer.Exit(1)
+    else:
+        console.print(f"[green]✓ Server is healthy (response time: {health_result['response_time']:.2f}s)[/green]")
+
     console.print()
 
     # Get max_model_len from server for display
     model_info = temp_client.get_model_info()
     server_max_model_len = model_info.get("max_model_len") if model_info else None
 
-    # Auto-detect server replicas and adjust workers if not specified
+    # Set workers to max capacity (16 = 4 pods × 4 workers)
+    # This allows KEDA to scale up pods as the request queue builds
+    # Requests will queue at the server until enough pods are available
     if max_workers is None:
-        console.print("[cyan]ℹ️  Auto-detecting server replicas...[/cyan]")
-        server_replicas = temp_client.get_server_replicas(namespace=namespace, timeout=5)
-        max_workers = temp_client.get_recommended_workers(
-            namespace=namespace, workers_per_replica=workers_per_replica, timeout=5
-        )
-        console.print(
-            f"[cyan]ℹ️  Detected {server_replicas} server replica(s) → using {max_workers} workers "
-            f"({workers_per_replica} per replica)[/cyan]"
-        )
+        max_workers = 16  # Fixed: 4 pods max × 4 workers per pod
+        console.print(f"[cyan]ℹ️  Using {max_workers} workers (max capacity for 4 pods)[/cyan]")
+        console.print("[cyan]   Requests will queue at server, KEDA auto-scales pods as needed[/cyan]")
         console.print()
-        logger.info(f"Auto-detected {server_replicas} replicas, using {max_workers} workers")
+        logger.info(f"Using {max_workers} workers (max capacity)")
 
     # If max_tokens not specified, use a reasonable default (not max_model_len!)
     # max_model_len is total context (input + output), so we can't use it all for output
