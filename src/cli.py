@@ -1,9 +1,11 @@
 """Integrated CLI for car contamination classification."""
 
+import sys
 from pathlib import Path
 from typing import Annotated
 
 import typer
+from loguru import logger
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
@@ -12,6 +14,10 @@ from rich.table import Table
 from src.api import VLMClient
 from src.inference import run_batch_inference
 from src.prompts import generate_prompt, parse_guideline
+
+
+# Remove default logger to avoid duplicate console output
+logger.remove()
 
 
 console = Console()
@@ -250,6 +256,17 @@ def batch_inference(
     output = Path("results") / f"{dataset_name}_{prompt_name}_result.csv"
     output.parent.mkdir(parents=True, exist_ok=True)
 
+    # Setup logging - save to same location as output CSV with .log extension
+    log_path = output.with_suffix(".log")
+    logger.add(
+        log_path,
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {message}",
+        level="INFO",
+        rotation=None,  # No rotation for single run
+        mode="w",  # Overwrite existing log
+    )
+    logger.info(f"Logging to {log_path}")
+
     # Determine API URL
     if api_url is None:
         api_url = _get_api_url(internal, model, namespace)
@@ -276,6 +293,24 @@ def batch_inference(
         max_tokens = 1000  # reasonable default for output tokens
         console.print(f"[cyan]ℹ️  Using default max_tokens: {max_tokens}[/cyan]")
         console.print()
+
+    # Log configuration
+    logger.info("=" * 60)
+    logger.info("BATCH INFERENCE STARTED")
+    logger.info("=" * 60)
+    logger.info(f"Input CSV: {input_csv}")
+    logger.info(f"Images directory: {images_dir}")
+    logger.info(f"Prompt file: {prompt}")
+    logger.info(f"Output CSV: {output}")
+    logger.info(f"API URL: {api_url}")
+    logger.info(f"Model: {model}")
+    if server_max_model_len:
+        logger.info(f"Max Model Len: {server_max_model_len}")
+    logger.info(f"Max Tokens: {max_tokens}")
+    logger.info(f"Workers: {max_workers}")
+    if limit:
+        logger.info(f"Limit: {limit}")
+    logger.info("-" * 60)
 
     # Display configuration in a table
     config_table = Table(title="⚙️  Configuration", show_header=False, box=None)
@@ -321,6 +356,22 @@ def batch_inference(
         # Calculate throughput
         throughput = summary["total"] / summary["total_time"] if summary["total_time"] > 0 else 0
         speedup = summary["avg_latency"] / summary["avg_time_per_image"] if summary["avg_time_per_image"] > 0 else 1
+
+        # Log summary
+        logger.info("=" * 60)
+        logger.info("BATCH INFERENCE COMPLETED")
+        logger.info("=" * 60)
+        logger.info(f"Total images: {summary['total']}")
+        logger.info(f"Successful: {summary['successful']}")
+        logger.info(f"Failed: {summary['failed']}")
+        logger.info(f"Total time: {summary['total_time']:.2f}s")
+        logger.info(f"Throughput: {throughput:.2f} images/sec")
+        logger.info(f"Time per image (avg): {summary['avg_time_per_image']:.2f}s")
+        logger.info(f"API latency (avg): {summary['avg_latency']:.3f}s")
+        logger.info(f"Parallel speedup: {speedup:.1f}x")
+        logger.info(f"Results saved to: {summary['output_path']}")
+        logger.info(f"Log saved to: {log_path}")
+        logger.info("=" * 60)
 
         summary_table.add_row("🖼️  Total images", str(summary["total"]))
         summary_table.add_row("✅ Successful", f"[green]{summary['successful']}[/green]")
@@ -381,14 +432,13 @@ def batch_inference(
             raise typer.Exit(1)
         elif summary["failed"] > 0:
             success_rate = (summary["successful"] / summary["total"]) * 100
-            msg = (
-                f"⚠️  Batch inference completed with {summary['failed']} failures " f"({success_rate:.1f}% success rate)"
-            )
+            msg = f"⚠️  Batch inference completed with {summary['failed']} failures ({success_rate:.1f}% success rate)"
             console.print(Panel.fit(msg, style="bold yellow"))
         else:
             console.print(Panel.fit("✓ Batch inference completed successfully!", style="bold green"))
 
     except Exception as e:
+        logger.error(f"Batch inference failed with error: {e}")
         console.print(f"[red]❌ Error: {e}[/red]")
         import traceback
 
@@ -471,7 +521,6 @@ def generate_prompt_cmd():
 
 def main():
     """Entry point for CLI."""
-    import sys
 
     # Show help if no arguments provided
     if len(sys.argv) == 1:
