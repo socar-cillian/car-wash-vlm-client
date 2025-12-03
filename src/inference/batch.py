@@ -543,105 +543,11 @@ def run_batch_inference(
     # Start timer for total processing time
     total_start_time = time.time()
 
-    # Process images in parallel
-    results = []
-    futures_to_data = {}
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        for data in image_data:
-            file_name = data["file_name"]
-
-            # Only use local files
-            image_path = images_dir / file_name
-            if not image_path.exists():
-                # Local file not found - skip this entry
-                row = {
-                    **data,  # Include all original CSV columns
-                    "model": model,
-                    "prompt_version": prompt_version,
-                    "latency_seconds": "0.000",
-                    "success": False,
-                    "error": "file_not_found",
-                    "image_type": "",
-                    "area_name": "",
-                    "sub_area": "",
-                    "contamination_type": "",
-                    "severity": "",
-                    "max_severity": "",
-                    "is_in_guideline": "",
-                    "raw_response": "",
-                }
-                results.append(row)
-                continue
-
-            # Use local file
-            image_source = str(image_path)
-            image_display_path = image_path
-
-            # Submit inference task
-            future = executor.submit(
-                process_image,
-                client,
-                image_source,  # Can be URL string or local path string
-                prompt,
-                max_tokens,
-                temperature,
-                file_name,  # Pass filename for logging
-            )
-            futures_to_data[future] = (data, image_display_path)
-
-        # Process completed tasks with progress bar
-        with tqdm(total=len(futures_to_data), desc="Processing images", unit="img") as pbar:
-            for future in as_completed(futures_to_data):
-                data, image_display_path = futures_to_data[future]
-
-                try:
-                    inference_result = future.result()
-                    row = create_csv_row(image_display_path, inference_result, model, prompt_version)
-
-                    # Add all original CSV columns
-                    for col in input_csv_columns:
-                        if col not in row:
-                            row[col] = data.get(col, "")
-
-                    results.append(row)
-
-                    # Update progress bar description
-                    if inference_result["success"]:
-                        pbar.set_postfix_str(f"✓ {image_display_path.name} ({inference_result['latency']:.2f}s)")
-                    else:
-                        pbar.set_postfix_str(f"✗ {image_display_path.name}")
-
-                except Exception as e:
-                    # Handle unexpected errors
-                    row = {
-                        **data,  # Include all original CSV columns
-                        "model": model,
-                        "prompt_version": prompt_version,
-                        "latency_seconds": "0.000",
-                        "success": False,
-                        "error": str(e),
-                        "image_type": "",
-                        "area_name": "",
-                        "sub_area": "",
-                        "contamination_type": "",
-                        "severity": "",
-                        "max_severity": "",
-                        "is_in_guideline": "",
-                        "raw_response": "",
-                    }
-                    results.append(row)
-                    pbar.set_postfix_str(f"✗ {image_display_path.name} (error)")
-
-                pbar.update(1)
-
-    # Save results - combine original CSV columns with inference results
+    # Prepare fieldnames for CSV output
     # Start with original CSV columns
     fieldnames = list(input_csv_columns)
 
     # Add inference result columns (v4.1 format)
-    # Note: 'label' column from input CSV is preserved in input_csv_columns
     inference_columns = [
         "image_name",
         "label",  # Include label column for evaluation
@@ -663,27 +569,136 @@ def run_batch_inference(
         if col not in fieldnames:
             fieldnames.append(col)
 
+    # Create output directory and open CSV file for streaming write
     output_csv.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_csv, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+
+    # Counters for summary (instead of storing all results in memory)
+    successful_count = 0
+    failed_count = 0
+    total_latency = 0.0
+
+    # Process images in parallel with streaming CSV write
+    futures_to_data = {}
+
+    with open(output_csv, "w", encoding="utf-8", newline="") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(results)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            for data in image_data:
+                file_name = data["file_name"]
+
+                # Only use local files
+                image_path = images_dir / file_name
+                if not image_path.exists():
+                    # Local file not found - write immediately and skip
+                    row = {
+                        **data,  # Include all original CSV columns
+                        "model": model,
+                        "prompt_version": prompt_version,
+                        "latency_seconds": "0.000",
+                        "success": False,
+                        "error": "file_not_found",
+                        "image_type": "",
+                        "area_name": "",
+                        "sub_area": "",
+                        "contamination_type": "",
+                        "severity": "",
+                        "max_severity": "",
+                        "is_in_guideline": "",
+                        "raw_response": "",
+                    }
+                    writer.writerow(row)
+                    failed_count += 1
+                    continue
+
+                # Use local file
+                image_source = str(image_path)
+                image_display_path = image_path
+
+                # Submit inference task
+                future = executor.submit(
+                    process_image,
+                    client,
+                    image_source,  # Can be URL string or local path string
+                    prompt,
+                    max_tokens,
+                    temperature,
+                    file_name,  # Pass filename for logging
+                )
+                futures_to_data[future] = (data, image_display_path)
+
+            # Process completed tasks with progress bar - write immediately to CSV
+            with tqdm(total=len(futures_to_data), desc="Processing images", unit="img") as pbar:
+                for future in as_completed(futures_to_data):
+                    data, image_display_path = futures_to_data[future]
+
+                    try:
+                        inference_result = future.result()
+                        row = create_csv_row(image_display_path, inference_result, model, prompt_version)
+
+                        # Add all original CSV columns
+                        for col in input_csv_columns:
+                            if col not in row:
+                                row[col] = data.get(col, "")
+
+                        # Write immediately to CSV (streaming write)
+                        writer.writerow(row)
+
+                        # Update counters
+                        latency = float(row["latency_seconds"])
+                        total_latency += latency
+                        if inference_result["success"]:
+                            successful_count += 1
+                            pbar.set_postfix_str(f"✓ {image_display_path.name} ({latency:.2f}s)")
+                        else:
+                            failed_count += 1
+                            pbar.set_postfix_str(f"✗ {image_display_path.name}")
+
+                    except Exception as e:
+                        # Handle unexpected errors
+                        row = {
+                            **data,  # Include all original CSV columns
+                            "model": model,
+                            "prompt_version": prompt_version,
+                            "latency_seconds": "0.000",
+                            "success": False,
+                            "error": str(e),
+                            "image_type": "",
+                            "area_name": "",
+                            "sub_area": "",
+                            "contamination_type": "",
+                            "severity": "",
+                            "max_severity": "",
+                            "is_in_guideline": "",
+                            "raw_response": "",
+                        }
+                        # Write immediately to CSV (streaming write)
+                        writer.writerow(row)
+                        failed_count += 1
+                        pbar.set_postfix_str(f"✗ {image_display_path.name} (error)")
+
+                    pbar.update(1)
+
+                    # Flush periodically to ensure data is written to disk
+                    if (successful_count + failed_count) % 100 == 0:
+                        csv_file.flush()
 
     # Calculate total processing time
     total_elapsed_time = time.time() - total_start_time
 
-    # Calculate summary
-    successful = sum(1 for r in results if r["success"])
-    failed = len(results) - successful
-    avg_latency = sum(float(r["latency_seconds"]) for r in results) / len(results)
+    # Calculate summary using counters (no need to store all results in memory)
+    total_count = successful_count + failed_count
+    avg_latency = total_latency / total_count if total_count > 0 else 0
 
     # Calculate per-image time (wall clock time divided by number of images)
-    avg_time_per_image = total_elapsed_time / len(results) if results else 0
+    avg_time_per_image = total_elapsed_time / total_count if total_count > 0 else 0
 
     return {
-        "total": len(results),
-        "successful": successful,
-        "failed": failed,
+        "total": total_count,
+        "successful": successful_count,
+        "failed": failed_count,
         "avg_latency": avg_latency,
         "total_time": total_elapsed_time,
         "avg_time_per_image": avg_time_per_image,
