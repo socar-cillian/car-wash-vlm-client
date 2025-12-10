@@ -276,8 +276,6 @@ def create_csv_row(image_path: Path, inference_result: dict, model_name: str, pr
         row["area_name"] = ""
         row["sub_area"] = ""
         row["contamination_type"] = ""
-        row["severity"] = ""
-        row["is_in_guideline"] = ""
         row["max_severity"] = ""
         row["raw_response"] = ""
         return row
@@ -305,7 +303,6 @@ def create_csv_row(image_path: Path, inference_result: dict, model_name: str, pr
         for contamination in contaminations:
             cont_type = contamination.get("contamination_type", "")
             severity = contamination.get("severity", "Level 0")
-            is_in_guideline = contamination.get("is_in_guideline", True)
 
             all_contaminations.append(
                 {
@@ -313,7 +310,6 @@ def create_csv_row(image_path: Path, inference_result: dict, model_name: str, pr
                     "sub_area": sub_area,
                     "contamination_type": cont_type,
                     "severity": severity,
-                    "is_in_guideline": is_in_guideline,
                 }
             )
 
@@ -331,8 +327,6 @@ def create_csv_row(image_path: Path, inference_result: dict, model_name: str, pr
         row["area_name"] = ""
         row["sub_area"] = ""
         row["contamination_type"] = ""
-        row["severity"] = ""
-        row["is_in_guideline"] = ""
         row["max_severity"] = "Level 0"
         row["raw_response"] = str(result)
         return row
@@ -341,16 +335,10 @@ def create_csv_row(image_path: Path, inference_result: dict, model_name: str, pr
     area_names = sorted({c["area_name"] for c in all_contaminations if c["area_name"]})
     sub_areas = sorted({c["sub_area"] for c in all_contaminations if c["sub_area"]})
     cont_types = sorted({c["contamination_type"] for c in all_contaminations if c["contamination_type"]})
-    severities = sorted({c["severity"] for c in all_contaminations if c["severity"]})
-
-    # Check if any contamination is not in guideline
-    has_non_guideline = any(not c["is_in_guideline"] for c in all_contaminations)
 
     row["area_name"] = ", ".join(area_names)
     row["sub_area"] = ", ".join(sub_areas)
     row["contamination_type"] = ", ".join(cont_types)
-    row["severity"] = ", ".join(severities)
-    row["is_in_guideline"] = "N" if has_non_guideline else "Y"
     row["max_severity"] = max_severity_str
     row["raw_response"] = str(result)
 
@@ -580,9 +568,7 @@ def run_batch_inference(
         "area_name",
         "sub_area",
         "contamination_type",
-        "severity",
         "max_severity",
-        "is_in_guideline",
         "raw_response",
     ]
     for col in inference_columns:
@@ -619,9 +605,7 @@ def run_batch_inference(
                     "area_name": "",
                     "sub_area": "",
                     "contamination_type": "",
-                    "severity": "",
                     "max_severity": "",
-                    "is_in_guideline": "",
                     "raw_response": "",
                 }
                 writer.writerow(row)
@@ -701,9 +685,7 @@ def run_batch_inference(
                             "area_name": "",
                             "sub_area": "",
                             "contamination_type": "",
-                            "severity": "",
                             "max_severity": "",
-                            "is_in_guideline": "",
                             "raw_response": "",
                         }
                         writer.writerow(row)
