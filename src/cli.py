@@ -71,17 +71,17 @@ def _get_api_url(internal: bool, model: str, namespace: str = "vllm-test") -> st
     Returns:
         Full API URL for the VLM service
     """
+    # Service name pattern: <release>-<model>-engine-service
+    # Release name matches namespace (vllm or vllm-test)
+    # Model name: qwen3-vl-8b
+    service_name = f"{namespace}-qwen3-vl-8b-engine-service"
+
     if internal:
-        # Internal K8s URL: <release>-<model>-engine-service.<namespace>.svc.cluster.local
-        # Release name matches namespace (vllm or vllm-test)
-        service_name = f"{namespace}-qwen3-vl-8b-engine-service"
+        # Internal K8s URL
         return f"http://{service_name}.{namespace}.svc.cluster.local:8000/v1/chat/completions"
     else:
-        # External URL - use namespace to determine URL
-        if namespace == "vllm":
-            return "https://vllm.mlops.socarcorp.co.kr/v1/chat/completions"
-        else:
-            return "https://vllm-test.mlops.socarcorp.co.kr/v1/chat/completions"
+        # External URL - model name is used as subdomain (from ingress-engine.yaml)
+        return "https://qwen3-vl-8b.mlops.socarcorp.co.kr/v1/chat/completions"
 
 
 @app.command("infer")
@@ -97,7 +97,7 @@ def single_inference(
     temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
     output: Annotated[Path | None, typer.Option(help="Output file path (optional)")] = None,
     internal: Annotated[bool, typer.Option("--internal", help="Use internal Kubernetes service URL")] = False,
-):
+) -> None:
     """Run inference on a single image."""
     typer.echo("=" * 60)
     typer.echo("Single Image Inference")
@@ -198,7 +198,7 @@ def batch_inference(
     ] = None,
     workers_per_replica: Annotated[int, typer.Option(help="Workers per GPU replica for auto-scaling (default: 4)")] = 4,
     internal: Annotated[bool, typer.Option("--internal", help="Use internal Kubernetes service URL")] = False,
-):
+) -> None:
     """Run batch inference on multiple images specified in CSV file."""
     console.print(Panel.fit("🚗 Batch Inference", style="bold magenta"))
 
@@ -276,6 +276,7 @@ def batch_inference(
         api_url = _get_api_url(internal, model, namespace)
 
     # Check server health with cold start support (KEDA may have scaled to 0)
+    console.print(f"[cyan]🌐 API URL: {api_url}[/cyan]")
     console.print("Checking server health...")
     temp_client = VLMClient(api_url=api_url, model=model)
     health_result = temp_client.check_health(timeout=10)
@@ -310,6 +311,8 @@ def batch_inference(
                 raise typer.Exit(1)
     else:
         console.print(f"[green]✓ Server is healthy (response time: {health_result['response_time']:.2f}s)[/green]")
+        if health_result.get("endpoint"):
+            console.print(f"[dim]  Health endpoint: {health_result['endpoint']}[/dim]")
 
     console.print()
 
@@ -317,14 +320,13 @@ def batch_inference(
     model_info = temp_client.get_model_info()
     server_max_model_len = model_info.get("max_model_len") if model_info else None
 
-    # Set workers to max capacity (16 = 4 pods × 4 workers)
-    # This allows KEDA to scale up pods as the request queue builds
-    # Requests will queue at the server until enough pods are available
+    # Set workers based on pod count
+    # Currently using 1 pod with 4 workers per pod
     if max_workers is None:
-        max_workers = 8  # Fixed: 2 pods × 4 workers per pod
-        console.print(f"[cyan]ℹ️  Using {max_workers} workers (2 pods × 4 workers)[/cyan]")
+        max_workers = 4  # Fixed: 1 pod × 4 workers per pod
+        console.print(f"[cyan]ℹ️  Using {max_workers} workers (1 pod × 4 workers)[/cyan]")
         console.print()
-        logger.info(f"Using {max_workers} workers (max capacity)")
+        logger.info(f"Using {max_workers} workers")
 
     # If max_tokens not specified, use a reasonable default (not max_model_len!)
     # max_model_len is total context (input + output), so we can't use it all for output
@@ -486,7 +488,7 @@ def batch_inference(
 
 
 @app.command("generate-prompt")
-def generate_prompt_cmd():
+def generate_prompt_cmd() -> None:
     """Generate prompt template from guideline CSV and car parts CSV."""
     console.print(Panel.fit("📝 Prompt Generation", style="bold magenta"))
     console.print()
@@ -536,7 +538,7 @@ def generate_prompt_cmd():
         if output is None:
             guideline_stem = guideline.stem
             version_str = guideline_stem.split("_v")[1] if "_v" in guideline_stem else "5"
-            prompts_dir = guideline.parent.parent / "prompts"
+            prompts_dir = Path("prompts")
             prompts_dir.mkdir(exist_ok=True)
             output = prompts_dir / f"prompt_v{version_str}.txt"
 
@@ -561,9 +563,8 @@ def generate_prompt_cmd():
         raise typer.Exit(1) from e
 
 
-def main():
+def main() -> None:
     """Entry point for CLI."""
-
     # Show help if no arguments provided
     if len(sys.argv) == 1:
         sys.argv.append("--help")

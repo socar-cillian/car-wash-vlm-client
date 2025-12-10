@@ -168,7 +168,7 @@ def download_all_images(rows: list[dict], output_dir: Path) -> list[dict]:
     return updated_rows
 
 
-def save_merged_csv(rows: list[dict], output_path: Path):
+def save_merged_csv(rows: list[dict], output_path: Path) -> None:
     """
     Save merged data to CSV file.
 
@@ -200,7 +200,7 @@ def save_merged_csv(rows: list[dict], output_path: Path):
     print(f"Total rows: {len(rows)}")
 
 
-def main():
+def main() -> None:
     """Main function to merge CSV files and download images."""
     # Get the project root directory (parent of src/utils/)
     script_dir = Path(__file__).resolve().parent

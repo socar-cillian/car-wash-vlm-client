@@ -1,11 +1,12 @@
 """Simple script to run car contamination inference."""
 
 from pathlib import Path
+from typing import Any
 
 from src.api import VLMClient
 
 
-def main():
+def main() -> None:
     # Configuration
     prompt_path = Path("prompts/prompt_v4.1.txt")
     image_path = input("🖼️  Image path (local file or URL): ").strip()
@@ -22,7 +23,7 @@ def main():
     prompt = prompt_path.read_text(encoding="utf-8")
 
     # Initialize client
-    api_url = "https://vllm-test.mlops.socarcorp.co.kr/v1/chat/completions"
+    api_url = "https://qwen3-vl-8b.mlops.socarcorp.co.kr/v1/chat/completions"
     model = "qwen3-vl-8b-instruct"
 
     print(f"\n🔧 API: {api_url}")
@@ -52,8 +53,9 @@ def main():
             temperature=0.0,
         )
 
-        if "choices" in response and response["choices"]:
-            result = response["choices"][0]["message"]["content"]
+        choices: list[Any] = response.get("choices", [])
+        if choices:
+            result: str = choices[0]["message"]["content"]
             print("\n" + "=" * 60)
             print("📊 Result:")
             print("=" * 60)

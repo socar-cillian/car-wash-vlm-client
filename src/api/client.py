@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import time
 from pathlib import Path
+from typing import Any
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -110,7 +111,7 @@ class VLMClient:
                 "response_time": response_time,
             }
 
-    def get_model_info(self, timeout: int = 10) -> dict | None:
+    def get_model_info(self, timeout: int = 10) -> dict[str, Any] | None:
         """
         Get model information including max_model_len from the server.
 
@@ -124,9 +125,9 @@ class VLMClient:
             base_url = self.api_url.rsplit("/v1/", 1)[0] if "/v1/" in self.api_url else self.api_url
             response = self.session.get(f"{base_url}/v1/models", timeout=timeout)
             if response.status_code == 200:
-                data = response.json()
+                data: dict[str, Any] = response.json()
                 if "data" in data and len(data["data"]) > 0:
-                    return data["data"][0]
+                    return dict(data["data"][0])
             return None
         except Exception:
             return None
@@ -150,7 +151,7 @@ class VLMClient:
             # Method 1: Try to query Kubernetes API (works inside K8s with proper ServiceAccount)
             import os
 
-            token_path = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+            token_path = "/var/run/secrets/kubernetes.io/serviceaccount/token"  # nosec B105
             ca_path = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
             if os.path.exists(token_path) and os.path.exists(ca_path):
@@ -180,8 +181,8 @@ class VLMClient:
                     if total_addresses > 0:
                         return total_addresses
 
-        except Exception:
-            pass
+        except Exception:  # nosec B110
+            pass  # Fallback to default if K8s API not available
 
         # Method 2: Fallback - assume 1 replica if we can reach the server
         health = self.check_health(timeout=timeout)
@@ -270,9 +271,9 @@ class VLMClient:
         prompt_input: str,
         max_tokens: int = 8192,
         temperature: float = 0.1,
-        response_format: dict = None,
+        response_format: dict[str, str] | None = None,
         image_name: str | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """
         Send a query to the VLM API.
 
@@ -327,7 +328,7 @@ class VLMClient:
         try:
             response = self.session.post(self.api_url, headers=headers, json=payload, timeout=120)
             response.raise_for_status()
-            result = response.json()
+            result: dict[str, Any] = response.json()
             return result
         except requests.exceptions.HTTPError as e:
             # Try to extract error details from response

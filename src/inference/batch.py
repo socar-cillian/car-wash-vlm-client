@@ -3,7 +3,7 @@
 import csv
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -482,11 +482,11 @@ def run_batch_inference(
 
     # Load input CSV with all columns
     print(f"Loading input CSV from {input_csv}")
-    image_data = []
-    input_csv_columns = []
+    image_data: list[dict[str, str]] = []
+    input_csv_columns: list[str] = []
     with open(input_csv, encoding="utf-8-sig") as f:  # utf-8-sig handles BOM
         reader = csv.DictReader(f)
-        input_csv_columns = reader.fieldnames or []
+        input_csv_columns = list(reader.fieldnames or [])
         for row in reader:
             # Get file_name - try multiple column names: file_name, image_name
             file_name = row.get("file_name") or row.get("image_name", "")
@@ -498,8 +498,8 @@ def run_batch_inference(
                     file_name = Path(filename_val).name
 
             if not file_name:
-                # Try file_url first, then image_url
-                url = row.get("file_url") or row.get("image_url")
+                # Try extracting from file_url or image_url
+                url = row.get("file_url") or row.get("image_url", "")
                 if url:
                     parsed = urlparse(url)
                     file_name = Path(parsed.path).name
@@ -516,26 +516,45 @@ def run_batch_inference(
 
     print(f"Loaded {len(image_data)} entries from CSV")
 
+    # Build a set of actual image files in the directory for fast lookup
+    actual_images = {f.name for f in images_dir.iterdir() if f.is_file()}
+    print(f"Found {len(actual_images)} image files in directory")
+
+    # Validate file names match actual images
+    matched_count = 0
+    unmatched_files = []
+    for data in image_data:
+        file_name = data["file_name"]
+        if file_name in actual_images:
+            matched_count += 1
+        else:
+            unmatched_files.append(file_name)
+
+    if unmatched_files:
+        print(f"⚠️  {len(unmatched_files)} CSV entries have no matching image file")
+        # Show first few unmatched for debugging
+        if len(unmatched_files) <= 5:
+            for unmatched in unmatched_files:
+                print(f"   - {unmatched}")
+        else:
+            for unmatched in unmatched_files[:3]:
+                print(f"   - {unmatched}")
+            print(f"   ... and {len(unmatched_files) - 3} more")
+
+    print(f"Matched {matched_count}/{len(image_data)} CSV entries to image files")
+
+    if matched_count == 0:
+        # Show sample file names from both sources for debugging
+        csv_samples = [d["file_name"] for d in image_data[:3]]
+        dir_samples = list(actual_images)[:3]
+        print(f"\nCSV file names (sample): {csv_samples}")
+        print(f"Directory file names (sample): {dir_samples}")
+        raise ValueError("No CSV entries match any image files in the directory")
+
     # Apply limit if specified
     if limit is not None and limit > 0:
         image_data = image_data[:limit]
         print(f"Processing first {len(image_data)} images (limit applied)")
-
-    # Check local image availability
-    local_count = 0
-    missing_count = 0
-    for data in image_data:
-        file_name = data["file_name"]
-        image_path = images_dir / file_name
-        if image_path.exists():
-            local_count += 1
-        else:
-            missing_count += 1
-
-    if missing_count > 0:
-        print(f"Image sources: {local_count} local files found, {missing_count} missing")
-    else:
-        print(f"Image sources: {local_count} local files")
 
     print(f"Starting parallel inference with {max_workers} workers...")
     print()
@@ -577,9 +596,6 @@ def run_batch_inference(
     successful_count = 0
     failed_count = 0
     total_latency = 0.0
-
-    # Process images in parallel with streaming CSV write
-    futures_to_data = {}
 
     with open(output_csv, "w", encoding="utf-8", newline="") as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
@@ -623,22 +639,26 @@ def run_batch_inference(
             TextColumn("• {task.fields[status]}"),
             refresh_per_second=10,
         ) as progress:
-            process_task = progress.add_task(
-                "Processing images", total=len(valid_images), status="starting..."
-            )
+            process_task = progress.add_task("Processing images", total=len(valid_images), status="starting...")
 
             # Use executor.map for simpler concurrent processing
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
 
-                def process_single(item):
+                def process_single(
+                    item: tuple[dict[str, str], Path],
+                ) -> tuple[dict[str, str], Path, dict[str, bool | str | float | dict[str, str]]]:
                     data, image_path = item
-                    return data, image_path, process_image(
-                        client,
-                        str(image_path),
-                        prompt,
-                        max_tokens,
-                        temperature,
-                        data["file_name"],
+                    return (
+                        data,
+                        image_path,
+                        process_image(
+                            client,
+                            str(image_path),
+                            prompt,
+                            max_tokens,
+                            temperature,
+                            data["file_name"],
+                        ),
                     )
 
                 # Process results as they complete

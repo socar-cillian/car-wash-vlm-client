@@ -501,4 +501,4 @@ def generate_prompt(
         interior_contaminations_list=interior_contaminations_list,
     )
 
-    return formatted_prompt
+    return str(formatted_prompt)

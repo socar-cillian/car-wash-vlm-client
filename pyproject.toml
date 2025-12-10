@@ -29,6 +29,10 @@ carwash = "src.cli:main"
 dev = [
     "pre-commit>=3.5.0",
     "ruff>=0.8.0",
+    "mypy>=1.14.0",
+    "bandit[toml]>=1.8.0",
+    "detect-secrets>=1.5.0",
+    "types-requests>=2.31.0",
 ]
 
 [tool.setuptools]
@@ -58,3 +62,20 @@ lines-after-imports = 2
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+ignore_missing_imports = true
+strict_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+show_error_codes = true
+
+[tool.bandit]
+exclude_dirs = ["tests", "venv", ".venv"]
+skips = ["B101"]
