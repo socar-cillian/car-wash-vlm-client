@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlparse
 
-from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeRemainingColumn
+from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 
 from src.api import VLMClient
 
@@ -616,14 +616,14 @@ def run_batch_inference(
         # Process with progress bar
         with Progress(
             TextColumn("[bold blue]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
+            BarColumn(bar_width=40),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TextColumn("({task.completed}/{task.total})"),
             TextColumn("•"),
             TimeRemainingColumn(),
-            TextColumn("• {task.fields[status]}"),
-            refresh_per_second=10,
+            refresh_per_second=2,
         ) as progress:
-            process_task = progress.add_task("Processing images", total=len(valid_images), status="starting...")
+            process_task = progress.add_task("Processing", total=len(valid_images))
 
             # Use executor.map for simpler concurrent processing
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -663,14 +663,9 @@ def run_batch_inference(
                         total_latency += latency
                         if inference_result["success"]:
                             successful_count += 1
-                            progress.update(
-                                process_task,
-                                advance=1,
-                                status=f"✓ {image_display_path.name} ({latency:.2f}s)",
-                            )
                         else:
                             failed_count += 1
-                            progress.update(process_task, advance=1, status=f"✗ {image_display_path.name}")
+                        progress.update(process_task, advance=1)
 
                     except Exception as e:
                         # Handle unexpected errors
@@ -690,7 +685,7 @@ def run_batch_inference(
                         }
                         writer.writerow(row)
                         failed_count += 1
-                        progress.update(process_task, advance=1, status=f"✗ {image_display_path.name} (error)")
+                        progress.update(process_task, advance=1)
 
                     # Flush periodically
                     if (successful_count + failed_count) % 100 == 0:
