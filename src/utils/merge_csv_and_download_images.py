@@ -202,16 +202,16 @@ def save_merged_csv(rows: list[dict], output_path: Path):
 
 def main():
     """Main function to merge CSV files and download images."""
-    # Get the project root directory (parent of utils/)
+    # Get the project root directory (parent of src/utils/)
     script_dir = Path(__file__).resolve().parent
-    project_root = script_dir.parent
+    project_root = script_dir.parent.parent
 
     parser = argparse.ArgumentParser(
         description="Merge CSV files and download images",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example:
-  python utils/merge_csv_and_download_images.py \\
+  python -m src.utils.merge_csv_and_download_images \\
     --csv-dir images/sample_images/csv \\
     --output merged_data.csv \\
     --image-dir images/sample_images/images
