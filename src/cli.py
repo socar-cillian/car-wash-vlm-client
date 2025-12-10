@@ -321,9 +321,8 @@ def batch_inference(
     # This allows KEDA to scale up pods as the request queue builds
     # Requests will queue at the server until enough pods are available
     if max_workers is None:
-        max_workers = 16  # Fixed: 4 pods max × 4 workers per pod
-        console.print(f"[cyan]ℹ️  Using {max_workers} workers (max capacity for 4 pods)[/cyan]")
-        console.print("[cyan]   Requests will queue at server, KEDA auto-scales pods as needed[/cyan]")
+        max_workers = 8  # Fixed: 2 pods × 4 workers per pod
+        console.print(f"[cyan]ℹ️  Using {max_workers} workers (2 pods × 4 workers)[/cyan]")
         console.print()
         logger.info(f"Using {max_workers} workers (max capacity)")
 
@@ -518,22 +517,25 @@ def generate_prompt_cmd():
         # Step 1: Parse guideline and car parts
         console.print("[bold]Step 1:[/bold] Parsing CSV files")
         console.print("-" * 60)
-        parsed_rows, area_to_sub_areas = parse_guideline(guideline, car_parts)
+        parsed_rows, part_to_details, exterior_parts, interior_parts, valid_levels = parse_guideline(
+            guideline, car_parts
+        )
         console.print(f"  Parsed [green]{len(parsed_rows)}[/green] guideline entries")
-        if area_to_sub_areas:
-            console.print(f"  Parsed [green]{len(area_to_sub_areas)}[/green] areas with sub-areas")
+        console.print(f"  Exterior parts: [green]{len(exterior_parts)}[/green]")
+        console.print(f"  Interior parts: [green]{len(interior_parts)}[/green]")
+        console.print(f"  Contamination types: [green]{len(valid_levels)}[/green]")
 
         # Step 2: Generate prompt
         console.print()
         console.print("[bold]Step 2:[/bold] Generating prompt template")
         console.print("-" * 60)
-        prompt_text = generate_prompt(parsed_rows, area_to_sub_areas)
+        prompt_text = generate_prompt(parsed_rows, part_to_details, exterior_parts, interior_parts, valid_levels)
         console.print("  [green]✓[/green] Prompt generated successfully")
 
         # Determine output path based on guideline version
         if output is None:
             guideline_stem = guideline.stem
-            version_str = guideline_stem.split("_v")[1] if "_v" in guideline_stem else "4"
+            version_str = guideline_stem.split("_v")[1] if "_v" in guideline_stem else "5"
             prompts_dir = guideline.parent.parent / "prompts"
             prompts_dir.mkdir(exist_ok=True)
             output = prompts_dir / f"prompt_v{version_str}.txt"
