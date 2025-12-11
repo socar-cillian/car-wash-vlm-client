@@ -273,6 +273,7 @@ class VLMClient:
         temperature: float = 0.1,
         response_format: dict[str, str] | None = None,
         image_name: str | None = None,
+        prompt_mode: str = "system",
     ) -> dict[str, Any]:
         """
         Send a query to the VLM API.
@@ -284,6 +285,8 @@ class VLMClient:
             temperature: Sampling temperature
             response_format: Response format configuration (e.g., {"type": "json_object"})
             image_name: Name of the image for logging purposes
+            prompt_mode: Where to place the prompt - "system" (enables vLLM prefix caching)
+                        or "user" (traditional mode, prompt with image in user message)
 
         Returns:
             API response as dictionary
@@ -302,11 +305,11 @@ class VLMClient:
         if image_name is None:
             image_name = Path(image_input).name if not image_input.startswith("http") else "url_image"
 
-        # Build request payload
-        # System prompt is separated for vLLM prefix caching optimization
-        payload = {
-            "model": self.model,
-            "messages": [
+        # Build request payload based on prompt_mode
+        if prompt_mode == "system":
+            # System prompt mode: enables vLLM prefix caching optimization
+            # Prompt goes to system message, only image in user message
+            messages = [
                 {
                     "role": "system",
                     "content": prompt,
@@ -317,7 +320,23 @@ class VLMClient:
                         {"type": "image_url", "image_url": {"url": image_url}},
                     ],
                 },
-            ],
+            ]
+        else:
+            # User prompt mode: traditional mode without prefix caching
+            # Both prompt and image in user message
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                        {"type": "text", "text": prompt},
+                    ],
+                }
+            ]
+
+        payload = {
+            "model": self.model,
+            "messages": messages,
             "max_tokens": max_tokens,
             "temperature": temperature,
         }

@@ -161,6 +161,7 @@ def process_image(
     max_tokens: int = 1000,
     temperature: float = 0.0,
     image_name: str | None = None,
+    prompt_mode: str = "system",
 ) -> dict:
     """
     Process a single image with VLM inference.
@@ -172,6 +173,8 @@ def process_image(
         max_tokens: Maximum tokens to generate
         temperature: Sampling temperature
         image_name: Optional image name for logging (used when image_path is a URL)
+        prompt_mode: Where to place the prompt - "system" (enables vLLM prefix caching)
+                    or "user" (traditional mode)
 
     Returns:
         Dictionary containing inference results and metadata
@@ -194,6 +197,7 @@ def process_image(
             max_tokens=max_tokens,
             temperature=temperature,
             image_name=image_name,
+            prompt_mode=prompt_mode,
         )
 
         latency = time.time() - start_time
@@ -440,6 +444,7 @@ def run_batch_inference(
     temperature: float,
     limit: int | None = None,
     max_workers: int = 16,
+    prompt_mode: str = "system",
 ) -> dict:
     """
     Run batch inference on images specified in CSV file with parallel processing.
@@ -455,6 +460,8 @@ def run_batch_inference(
         temperature: Sampling temperature
         limit: Maximum number of images to process (default: all)
         max_workers: Number of parallel workers (default: 4)
+        prompt_mode: Where to place the prompt - "system" (enables vLLM prefix caching)
+                    or "user" (traditional mode)
 
     Returns:
         Dictionary with summary statistics
@@ -642,6 +649,7 @@ def run_batch_inference(
                             max_tokens,
                             temperature,
                             data["file_name"],
+                            prompt_mode,
                         ),
                     )
 

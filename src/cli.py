@@ -1051,6 +1051,392 @@ def resume_batch_job(
         raise typer.Exit(1) from e
 
 
+@app.command("benchmark-cache")
+def benchmark_cache(
+    input_csv: Annotated[Path | None, typer.Argument(help="Input CSV file with file_name column")] = None,
+    images_dir: Annotated[Path | None, typer.Argument(help="Directory containing images")] = None,
+    prompt: Annotated[Path | None, typer.Argument(help="Path to prompt file")] = None,
+    model: Annotated[str, typer.Option(help="Model name")] = "qwen3-vl-8b-instruct",
+    max_tokens: Annotated[int, typer.Option(help="Maximum tokens to generate")] = 1000,
+    temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
+    limit: Annotated[int | None, typer.Option(help="Number of images to benchmark")] = 1000,
+    max_workers: Annotated[int, typer.Option(help="Number of parallel workers for system mode")] = 12,
+    api_url: Annotated[str | None, typer.Option(help="VLM API URL")] = None,
+    internal: Annotated[bool, typer.Option("--internal", help="Use internal Kubernetes service URL")] = False,
+) -> None:
+    """Benchmark vLLM prefix caching performance.
+
+    Compares inference speed between:
+    - system mode: prompt in system message (enables prefix caching)
+    - user mode: prompt in user message (no prefix caching)
+    """
+    console.print(Panel.fit("⚡ Prefix Caching Benchmark", style="bold magenta"))
+    console.print()
+
+    # Interactive input if arguments not provided
+    if input_csv is None:
+        input_csv_str = Prompt.ask("[cyan]📄 Input CSV file path[/cyan]")
+        input_csv = _resolve_path(input_csv_str)
+
+    if images_dir is None:
+        images_dir_str = Prompt.ask("[cyan]📁 Images directory path[/cyan]")
+        images_dir = _resolve_path(images_dir_str)
+
+    if prompt is None:
+        prompt_str = Prompt.ask("[cyan]📝 Prompt file path[/cyan]")
+        prompt = _resolve_path(prompt_str)
+
+    # Ask for limit if not provided
+    if limit is None:
+        limit_str = Prompt.ask("[cyan]🔢 Number of images to benchmark (default: 1000)[/cyan]", default="1000")
+        try:
+            limit = int(limit_str)
+        except ValueError:
+            limit = 1000
+
+    # Determine namespace
+    namespace = "vllm-test"
+    if api_url is None and not internal:
+        internal_str = Prompt.ask("[cyan]🔧 Running inside Kubernetes cluster? (y/N)[/cyan]", default="N")
+        internal = internal_str.strip().lower() in ["y", "yes"]
+
+    if api_url is None:
+        namespace = Prompt.ask(
+            "[cyan]🏷️  Select namespace (vllm / vllm-test)[/cyan]", choices=["vllm", "vllm-test"], default="vllm-test"
+        )
+
+    console.print()
+
+    # Validate paths
+    if not input_csv.exists():
+        console.print(f"[red]❌ Error: Input CSV file not found: {input_csv}[/red]")
+        raise typer.Exit(1)
+
+    if not images_dir.exists():
+        console.print(f"[red]❌ Error: Images directory not found: {images_dir}[/red]")
+        raise typer.Exit(1)
+
+    if not prompt.exists():
+        console.print(f"[red]❌ Error: Prompt file not found: {prompt}[/red]")
+        raise typer.Exit(1)
+
+    # Determine API URL
+    if api_url is None:
+        api_url = _get_api_url(internal, model, namespace)
+
+    # Check server health
+    console.print(f"[cyan]🌐 API URL: {api_url}[/cyan]")
+    console.print("Checking server health...")
+    temp_client = VLMClient(api_url=api_url, model=model)
+    health_result = temp_client.check_health(timeout=10)
+
+    if not health_result["healthy"]:
+        console.print(f"[red]❌ Server not healthy: {health_result.get('error', 'Unknown error')}[/red]")
+        raise typer.Exit(1)
+
+    console.print("[green]✓ Server is healthy[/green]")
+    console.print()
+
+    # Display benchmark configuration
+    config_table = Table(title="⚙️  Benchmark Configuration", show_header=False, box=None)
+    config_table.add_column("Key", style="cyan", width=20)
+    config_table.add_column("Value", style="white")
+
+    config_table.add_row("📄 Input CSV", str(input_csv))
+    config_table.add_row("📁 Images directory", str(images_dir))
+    config_table.add_row("📝 Prompt file", str(prompt))
+    config_table.add_row("🌐 API URL", api_url)
+    config_table.add_row("🤖 Model", model)
+    config_table.add_row("📊 Images to test", str(limit))
+    config_table.add_row("⚡ Workers", str(max_workers))
+
+    console.print(config_table)
+    console.print()
+
+    # Create output directory for benchmark results
+    from datetime import datetime
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    benchmark_dir = Path("results") / f"benchmark_{timestamp}"
+    benchmark_dir.mkdir(parents=True, exist_ok=True)
+    console.print(f"[cyan]📁 Benchmark results will be saved to: {benchmark_dir}[/cyan]")
+    console.print()
+
+    results = {}
+    first_run = True
+
+    for mode in ["system", "user"]:
+        # Wait between runs to allow server to stabilize (GPU memory cleanup)
+        if not first_run:
+            console.print("[dim]Waiting 10s for server to stabilize...[/dim]")
+            time.sleep(10)
+        first_run = False
+
+        mode_label = "System prompt (prefix caching)" if mode == "system" else "User prompt (no caching)"
+        console.print(f"[bold cyan]Running benchmark: {mode_label}[/bold cyan]")
+        console.print()
+
+        output_csv = benchmark_dir / f"benchmark_{mode}.csv"
+
+        try:
+            summary = run_batch_inference(
+                input_csv=input_csv,
+                images_dir=images_dir,
+                prompt_path=prompt,
+                output_csv=output_csv,
+                api_url=api_url,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                limit=limit,
+                max_workers=max_workers if mode == "system" else 4,
+                prompt_mode=mode,
+            )
+
+            actual_workers = max_workers if mode == "system" else 4
+            results[mode] = {
+                "total": summary["total"],
+                "successful": summary["successful"],
+                "failed": summary["failed"],
+                "total_time": summary["total_time"],
+                "avg_latency": summary["avg_latency"],
+                "avg_time_per_image": summary["avg_time_per_image"],
+                "throughput": summary["total"] / summary["total_time"] if summary["total_time"] > 0 else 0,
+                "output_csv": output_csv,
+                "workers": actual_workers,
+            }
+
+            if summary["failed"] > 0:
+                console.print(
+                    f"[yellow]⚠ {mode_label}: {summary['total_time']:.2f}s "
+                    f"({summary['failed']}/{summary['total']} failed)[/yellow]"
+                )
+                # Show error samples
+                import pandas as pd
+
+                df = pd.read_csv(output_csv)
+                errors = df[~df["success"]]["error"].dropna().head(3).tolist()
+                if errors:
+                    console.print("[yellow]  Error samples:[/yellow]")
+                    for err in errors:
+                        err_str = str(err)[:100]
+                        console.print(f"    - {err_str}")
+            else:
+                console.print(f"[green]✓ {mode_label}: {summary['total_time']:.2f}s[/green]")
+            console.print()
+
+        except Exception as e:
+            console.print(f"[red]❌ Error in {mode} mode: {e}[/red]")
+            results[mode] = {}  # Empty dict instead of None
+
+    # Display comparison results
+    console.print()
+    console.print(Panel.fit("📊 Benchmark Results", style="bold green"))
+    console.print()
+
+    if results.get("system") and results.get("user"):
+        system_result = results["system"]
+        user_result = results["user"]
+
+        result_table = Table(title="Prefix Caching Comparison", show_header=True)
+        result_table.add_column("Metric", style="cyan", width=25)
+        result_table.add_column("System (cached)", style="green", justify="right")
+        result_table.add_column("User (no cache)", style="yellow", justify="right")
+        result_table.add_column("Difference", style="magenta", justify="right")
+
+        # Total time comparison
+        time_diff = user_result["total_time"] - system_result["total_time"]
+        time_pct = (time_diff / user_result["total_time"]) * 100 if user_result["total_time"] > 0 else 0
+        result_table.add_row(
+            "Total time",
+            f"{system_result['total_time']:.2f}s",
+            f"{user_result['total_time']:.2f}s",
+            f"{time_diff:+.2f}s ({time_pct:+.1f}%)",
+        )
+
+        # Throughput comparison
+        throughput_diff = system_result["throughput"] - user_result["throughput"]
+        throughput_pct = (throughput_diff / user_result["throughput"]) * 100 if user_result["throughput"] > 0 else 0
+        result_table.add_row(
+            "Throughput",
+            f"{system_result['throughput']:.2f} img/s",
+            f"{user_result['throughput']:.2f} img/s",
+            f"{throughput_diff:+.2f} ({throughput_pct:+.1f}%)",
+        )
+
+        # Avg latency comparison
+        latency_diff = user_result["avg_latency"] - system_result["avg_latency"]
+        latency_pct = (latency_diff / user_result["avg_latency"]) * 100 if user_result["avg_latency"] > 0 else 0
+        result_table.add_row(
+            "Avg API latency",
+            f"{system_result['avg_latency']:.3f}s",
+            f"{user_result['avg_latency']:.3f}s",
+            f"{latency_diff:+.3f}s ({latency_pct:+.1f}%)",
+        )
+
+        # Avg time per image
+        time_per_img_diff = user_result["avg_time_per_image"] - system_result["avg_time_per_image"]
+        time_per_img_pct = (
+            (time_per_img_diff / user_result["avg_time_per_image"]) * 100
+            if user_result["avg_time_per_image"] > 0
+            else 0
+        )
+        result_table.add_row(
+            "Avg time per image",
+            f"{system_result['avg_time_per_image']:.3f}s",
+            f"{user_result['avg_time_per_image']:.3f}s",
+            f"{time_per_img_diff:+.3f}s ({time_per_img_pct:+.1f}%)",
+        )
+
+        # Success rate
+        system_success_rate = (
+            (system_result["successful"] / system_result["total"]) * 100 if system_result["total"] > 0 else 0
+        )
+        user_success_rate = (user_result["successful"] / user_result["total"]) * 100 if user_result["total"] > 0 else 0
+        result_table.add_row(
+            "Success rate",
+            f"{system_success_rate:.1f}%",
+            f"{user_success_rate:.1f}%",
+            f"{system_success_rate - user_success_rate:+.1f}%",
+        )
+
+        # Workers
+        result_table.add_row(
+            "Workers",
+            f"{system_result['workers']}",
+            f"{user_result['workers']}",
+            "-",
+        )
+
+        console.print(result_table)
+        console.print()
+
+        # Summary
+        speedup = user_result["total_time"] / system_result["total_time"] if system_result["total_time"] > 0 else 1
+
+        if speedup > 1.05:
+            console.print(f"[bold green]✓ Prefix caching provides {speedup:.2f}x speedup![/bold green]")
+        elif speedup < 0.95:
+            console.print(
+                f"[bold yellow]⚠ User mode was faster ({1 / speedup:.2f}x). "
+                "Prefix caching may not be effective for this workload.[/bold yellow]"
+            )
+        else:
+            console.print("[bold cyan]≈ Performance is similar between both modes.[/bold cyan]")
+
+    else:
+        console.print("[red]Could not complete benchmark comparison.[/red]")
+        if results.get("system"):
+            console.print(f"  System mode: {results['system']['total_time']:.2f}s")
+        if results.get("user"):
+            console.print(f"  User mode: {results['user']['total_time']:.2f}s")
+
+    # Estimate time for 140,000 images
+    console.print()
+    console.print(Panel.fit("📈 140,000 Images Processing Time Estimate", style="bold blue"))
+    console.print()
+
+    target_images = 140000
+
+    estimate_table = Table(title="Estimated Processing Time for 140K Images", show_header=True)
+    estimate_table.add_column("Mode", style="cyan", width=25)
+    estimate_table.add_column("Throughput", style="white", justify="right")
+    estimate_table.add_column("Estimated Time", style="yellow", justify="right")
+    estimate_table.add_column("Estimated Hours", style="green", justify="right")
+
+    if results.get("system") and results["system"].get("throughput", 0) > 0:
+        system_throughput = results["system"]["throughput"]
+        system_est_seconds = target_images / system_throughput
+        system_est_hours = system_est_seconds / 3600
+        estimate_table.add_row(
+            "System (prefix caching)",
+            f"{system_throughput:.2f} img/s",
+            f"{system_est_seconds:.0f}s",
+            f"[bold green]{system_est_hours:.1f}h[/bold green]",
+        )
+    else:
+        estimate_table.add_row("System (prefix caching)", "N/A", "N/A", "N/A")
+
+    if results.get("user") and results["user"].get("throughput", 0) > 0:
+        user_throughput = results["user"]["throughput"]
+        user_est_seconds = target_images / user_throughput
+        user_est_hours = user_est_seconds / 3600
+        estimate_table.add_row(
+            "User (no caching)",
+            f"{user_throughput:.2f} img/s",
+            f"{user_est_seconds:.0f}s",
+            f"[bold yellow]{user_est_hours:.1f}h[/bold yellow]",
+        )
+    else:
+        estimate_table.add_row("User (no caching)", "N/A", "N/A", "N/A")
+
+    console.print(estimate_table)
+
+    # Show time savings
+    if (
+        results.get("system")
+        and results.get("user")
+        and results["system"].get("throughput", 0) > 0
+        and results["user"].get("throughput", 0) > 0
+    ):
+        system_est_hours = target_images / results["system"]["throughput"] / 3600
+        user_est_hours = target_images / results["user"]["throughput"] / 3600
+        time_saved_hours = user_est_hours - system_est_hours
+
+        if time_saved_hours > 0:
+            console.print()
+            console.print(
+                f"[bold green]💡 Prefix caching saves approximately {time_saved_hours:.1f} hours "
+                f"for 140K images![/bold green]"
+            )
+
+    # Run comparison analysis if both results exist
+    if results.get("system") and results.get("user"):
+        system_csv = results["system"].get("output_csv")
+        user_csv = results["user"].get("output_csv")
+
+        if system_csv and user_csv and Path(system_csv).exists() and Path(user_csv).exists():
+            console.print()
+            console.print(Panel.fit("🔍 Response Comparison Analysis", style="bold cyan"))
+            console.print()
+
+            from src.inference.compare import compare_benchmark_results
+
+            comparison = compare_benchmark_results(Path(system_csv), Path(user_csv))
+
+            # Save comparison report
+            comparison_file = benchmark_dir / "comparison_report.json"
+            import json
+
+            with open(comparison_file, "w", encoding="utf-8") as f:
+                json.dump(comparison, f, indent=2, ensure_ascii=False)
+
+            # Display comparison metrics
+            comp_table = Table(title="Response Comparison", show_header=False, box=None)
+            comp_table.add_column("Metric", style="cyan", width=30)
+            comp_table.add_column("Value", style="white")
+
+            comp_table.add_row("📊 Total compared", str(comparison["total_compared"]))
+            comp_table.add_row(
+                "✅ Identical responses",
+                f"[green]{comparison['identical']} ({comparison['identical_pct']:.1f}%)[/green]",
+            )
+            comp_table.add_row(
+                "⚠️  Different responses",
+                f"[yellow]{comparison['different']} ({comparison['different_pct']:.1f}%)[/yellow]",
+            )
+            comp_table.add_row("❌ Parse errors (system)", str(comparison["system_parse_errors"]))
+            comp_table.add_row("❌ Parse errors (user)", str(comparison["user_parse_errors"]))
+
+            console.print(comp_table)
+            console.print()
+            console.print(f"[dim]Detailed comparison saved to: {comparison_file}[/dim]")
+
+    console.print()
+    console.print(f"[bold green]✓ Benchmark results saved to: {benchmark_dir}[/bold green]")
+    console.print()
+
+
 def main() -> None:
     """Entry point for CLI."""
     # Show help if no arguments provided
