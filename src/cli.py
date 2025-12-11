@@ -13,7 +13,7 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from src.api import VLMClient
-from src.inference import run_batch_inference
+from src.inference import run_batch_inference, run_gemini_batch_inference
 from src.prompts import generate_prompt, parse_guideline
 
 
@@ -487,6 +487,320 @@ def batch_inference(
         raise typer.Exit(1) from e
 
 
+@app.command("gemini-batch")
+def gemini_batch_inference(
+    input_csv: Annotated[
+        Path | None, typer.Argument(help="Input CSV file with file_name column (optional for GCS)")
+    ] = None,
+    images_dir: Annotated[str | None, typer.Argument(help="Images path (local dir or GCS: gs://bucket/path)")] = None,
+    prompt: Annotated[Path | None, typer.Argument(help="Path to prompt file")] = None,
+    model: Annotated[str | None, typer.Option(help="Model name (default: from .env MODEL_NAME)")] = None,
+    max_tokens: Annotated[int, typer.Option(help="Maximum tokens to generate")] = 1000,
+    temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
+    limit: Annotated[int | None, typer.Option(help="Maximum number of images to process (default: all)")] = None,
+    poll_interval: Annotated[int, typer.Option(help="Seconds between status checks")] = 30,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip cost confirmation prompt")] = False,
+    gcs_bucket: Annotated[
+        str | None,
+        typer.Option("--gcs-bucket", help="GCS bucket name for Vertex AI batch jobs"),
+    ] = None,
+) -> None:
+    """Run batch inference using Gemini Batch API (50% cost savings).
+
+    Supports both local images and GCS images:
+    - Local: carwash gemini-batch input.csv ./images prompt.txt
+    - GCS: carwash gemini-batch gs://bucket/path/images prompt.txt
+    - GCS with CSV filter: carwash gemini-batch input.csv gs://bucket/path prompt.txt
+    """
+    console.print(Panel.fit("🚀 Gemini Batch Inference", style="bold magenta"))
+    console.print()
+    console.print("[cyan]Using Gemini Batch API for 50% cost savings[/cyan]")
+    console.print("[cyan]Note: Batch jobs may take up to 24 hours to complete[/cyan]")
+    console.print()
+
+    # Interactive input if arguments not provided
+    if images_dir is None:
+        images_dir_str = Prompt.ask("[cyan]📁 Images path (local dir or GCS: gs://bucket/path)[/cyan]")
+        images_dir = images_dir_str
+    else:
+        images_dir_str = images_dir
+
+    # Check if using GCS path
+    is_gcs_path = images_dir_str.startswith("gs://") or (
+        "/" in images_dir_str and not images_dir_str.startswith("/") and not Path(images_dir_str).exists()
+    )
+
+    # Track temp CSV path if downloaded from GCS
+    temp_csv_path: Path | None = None
+
+    if is_gcs_path:
+        console.print(f"[cyan]Using GCS images: {images_dir_str}[/cyan]")
+        # For GCS, input_csv is optional
+        if input_csv is None:
+            csv_str = Prompt.ask(
+                "[cyan]📄 Input CSV file path (optional, press Enter to use all GCS images)[/cyan]", default=""
+            )
+            if csv_str and csv_str.strip():
+                # Check if CSV is also in GCS
+                if csv_str.startswith("gs://") or (
+                    "/" in csv_str and not csv_str.startswith("/") and not Path(csv_str).exists()
+                ):
+                    # Download CSV from GCS
+                    import tempfile
+
+                    from src.inference.gemini_batch import download_from_gcs
+
+                    gcs_csv_uri = csv_str if csv_str.startswith("gs://") else f"gs://{csv_str}"
+                    temp_csv_path = Path(tempfile.gettempdir()) / "gemini_batch" / "input.csv"
+                    temp_csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+                    console.print(f"[cyan]Downloading CSV from GCS: {gcs_csv_uri}[/cyan]")
+                    try:
+                        download_from_gcs(gcs_csv_uri, temp_csv_path)
+                        input_csv = temp_csv_path
+                        console.print(f"[green]Downloaded CSV to: {temp_csv_path}[/green]")
+                    except Exception as e:
+                        error_msg = str(e)
+                        if "403" in error_msg or "Forbidden" in error_msg:
+                            console.print(f"[red]❌ Permission denied accessing GCS: {gcs_csv_uri}[/red]")
+                            console.print(
+                                "[yellow]Check that your service account has 'Storage Object Viewer' role.[/yellow]"
+                            )
+                        else:
+                            console.print(f"[red]❌ Error downloading CSV from GCS: {e}[/red]")
+                        raise typer.Exit(1) from e
+                else:
+                    input_csv = _resolve_path(csv_str)
+    else:
+        # For local, input_csv is required
+        if input_csv is None:
+            input_csv_str = Prompt.ask("[cyan]📄 Input CSV file path[/cyan]")
+            input_csv = _resolve_path(input_csv_str)
+
+    if prompt is None:
+        prompt_str = Prompt.ask("[cyan]📝 Prompt file path[/cyan]")
+        prompt = _resolve_path(prompt_str)
+
+    # Ask for limit if not provided
+    if limit is None:
+        limit_str = Prompt.ask("[cyan]🔢 Maximum number of images to process (press Enter for all)[/cyan]", default="")
+        if limit_str and limit_str.strip():
+            try:
+                limit = int(limit_str)
+            except ValueError:
+                console.print("[yellow]⚠️  Invalid number, processing all images[/yellow]")
+                limit = None
+
+    console.print()
+
+    # Validate paths
+    if input_csv is not None and not input_csv.exists():
+        console.print(f"[red]❌ Error: Input CSV file not found: {input_csv}[/red]")
+        raise typer.Exit(1)
+
+    if not is_gcs_path:
+        local_images_dir = Path(images_dir_str)
+        if not local_images_dir.exists():
+            console.print(f"[red]❌ Error: Images directory not found: {local_images_dir}[/red]")
+            raise typer.Exit(1)
+
+    if not prompt.exists():
+        console.print(f"[red]❌ Error: Prompt file not found: {prompt}[/red]")
+        raise typer.Exit(1)
+
+    # Auto-generate output path
+    prompt_name = prompt.stem
+    if is_gcs_path:
+        # Extract dataset name from GCS path
+        gcs_parts = images_dir_str.replace("gs://", "").split("/")
+        dataset_name = gcs_parts[-1] if gcs_parts[-1] else gcs_parts[-2] if len(gcs_parts) > 1 else "gcs"
+    else:
+        local_dir = Path(images_dir_str)
+        dataset_name = local_dir.parent.name if local_dir.name == "images" else local_dir.name
+    model_suffix = model.replace("-", "_") if model else "gemini"
+    output = Path("results") / f"{dataset_name}_{prompt_name}_{model_suffix}_batch_result.csv"
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    # Setup logging
+    log_path = output.with_suffix(".log")
+    logger.add(
+        log_path,
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {message}",
+        level="INFO",
+        rotation=None,
+        mode="w",
+    )
+
+    # Get model from env if not specified
+    import os
+
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    if model is None:
+        model = os.getenv("MODEL_NAME", "gemini-2.5-flash")
+
+    # Check if using Vertex AI (requires GCS bucket)
+    use_vertex = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "FALSE").upper() == "TRUE"
+
+    # Ask for GCS bucket if using Vertex AI and not provided
+    if use_vertex and gcs_bucket is None:
+        gcs_bucket_str = Prompt.ask(
+            "[cyan]🪣 GCS bucket name (for Vertex AI batch jobs)[/cyan]", default=os.getenv("GCS_BUCKET_NAME", "")
+        )
+        if gcs_bucket_str and gcs_bucket_str.strip():
+            gcs_bucket = gcs_bucket_str.strip()
+
+    # Display configuration
+    config_table = Table(title="⚙️  Configuration", show_header=False, box=None)
+    config_table.add_column("Key", style="cyan", width=20)
+    config_table.add_column("Value", style="white")
+
+    config_table.add_row("📄 Input CSV", str(input_csv) if input_csv else "(all GCS images)")
+    config_table.add_row("📁 Images", images_dir_str + (" (GCS)" if is_gcs_path else " (local)"))
+    config_table.add_row("📝 Prompt file", str(prompt))
+    config_table.add_row("💾 Output CSV", str(output))
+    config_table.add_row("🤖 Model", model)
+    config_table.add_row("🔢 Max Tokens", str(max_tokens))
+    config_table.add_row("🌡️  Temperature", str(temperature))
+    config_table.add_row("⏱️  Poll Interval", f"{poll_interval}s")
+    if gcs_bucket:
+        config_table.add_row("🪣 GCS Bucket", gcs_bucket)
+    if limit:
+        config_table.add_row("📊 Limit", str(limit))
+
+    console.print(config_table)
+    console.print()
+
+    # Log configuration
+    logger.info("=" * 60)
+    logger.info("GEMINI BATCH INFERENCE STARTED")
+    logger.info("=" * 60)
+    logger.info(f"Input CSV: {input_csv}")
+    logger.info(f"Images: {images_dir_str} ({'GCS' if is_gcs_path else 'local'})")
+    logger.info(f"Prompt file: {prompt}")
+    logger.info(f"Output CSV: {output}")
+    logger.info(f"Model: {model}")
+    logger.info(f"Max Tokens: {max_tokens}")
+    logger.info(f"Poll Interval: {poll_interval}s")
+    if gcs_bucket:
+        logger.info(f"GCS Bucket: {gcs_bucket}")
+    if limit:
+        logger.info(f"Limit: {limit}")
+    logger.info("-" * 60)
+
+    try:
+        summary = run_gemini_batch_inference(
+            input_csv=input_csv,
+            images_dir=images_dir_str,
+            prompt_path=prompt,
+            output_csv=output,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            skip_confirmation=yes,
+            limit=limit,
+            poll_interval=poll_interval,
+            gcs_bucket=gcs_bucket,
+        )
+
+        # Check if cancelled
+        if summary.get("cancelled"):
+            raise typer.Exit(0)
+
+        # Display summary
+        console.print()
+        summary_table = Table(title="📊 Summary", show_header=False, box=None)
+        summary_table.add_column("Key", style="cyan", width=30)
+        summary_table.add_column("Value", style="white")
+
+        summary_table.add_row("🖼️  Total images", str(summary["total"]))
+        summary_table.add_row("✅ Successful", f"[green]{summary['successful']}[/green]")
+        summary_table.add_row("❌ Failed", f"[red]{summary['failed']}[/red]")
+        summary_table.add_row("💾 Results saved to", str(summary["output_path"]))
+
+        console.print(summary_table)
+        console.print()
+
+        # Display timing information
+        timing = summary.get("timing", {})
+        if timing:
+            timing_table = Table(title="⏱️  Timing Information", show_header=False, box=None)
+            timing_table.add_column("Key", style="cyan", width=30)
+            timing_table.add_column("Value", style="white")
+
+            if timing.get("job_submitted_at"):
+                timing_table.add_row("📤 Job Submitted", timing["job_submitted_at"])
+            if timing.get("job_started_at"):
+                timing_table.add_row("▶️  Job Started", timing["job_started_at"])
+            if timing.get("job_completed_at"):
+                timing_table.add_row("✅ Job Completed", timing["job_completed_at"])
+            if timing.get("total_duration_seconds"):
+                duration_str = f"{float(timing['total_duration_seconds']):.2f}s"
+                timing_table.add_row("⏱️  Total Duration", f"[bold yellow]{duration_str}[/bold yellow]")
+            if timing.get("actual_processing_seconds"):
+                processing_str = f"{float(timing['actual_processing_seconds']):.2f}s"
+                timing_table.add_row("⚡ Actual Processing", f"[bold cyan]{processing_str}[/bold cyan]")
+
+            console.print(timing_table)
+            console.print()
+
+        # Display cost information
+        cost = summary.get("cost", {})
+        if cost:
+            cost_table = Table(title="💰 Cost Information", show_header=False, box=None)
+            cost_table.add_column("Key", style="cyan", width=30)
+            cost_table.add_column("Value", style="white")
+
+            cost_table.add_row("📥 Input Tokens", str(cost.get("input_tokens", 0)))
+            cost_table.add_row("📤 Output Tokens", str(cost.get("output_tokens", 0)))
+            cost_table.add_row("📊 Total Tokens", str(cost.get("total_tokens", 0)))
+            cost_table.add_row("💵 Input Cost (USD)", cost.get("input_cost_usd", "$0.00"))
+            cost_table.add_row("💵 Output Cost (USD)", cost.get("output_cost_usd", "$0.00"))
+            cost_table.add_row("💰 Total Cost (USD)", f"[bold green]{cost.get('total_cost_usd', '$0.00')}[/bold green]")
+            cost_table.add_row("💴 Total Cost (KRW)", f"[bold green]{cost.get('total_cost_krw', '₩0.00')}[/bold green]")
+            cost_table.add_row("🏷️  Batch Pricing", "Yes (50% input discount)" if cost.get("is_batch_pricing") else "No")
+
+            console.print(cost_table)
+            console.print()
+
+        # Log summary
+        logger.info("=" * 60)
+        logger.info("GEMINI BATCH INFERENCE COMPLETED")
+        logger.info("=" * 60)
+        logger.info(f"Total images: {summary['total']}")
+        logger.info(f"Successful: {summary['successful']}")
+        logger.info(f"Failed: {summary['failed']}")
+        if timing:
+            logger.info(f"Total Duration: {timing.get('total_duration_seconds', 'N/A')}s")
+            logger.info(f"Actual Processing: {timing.get('actual_processing_seconds', 'N/A')}s")
+        if cost:
+            logger.info(f"Total Cost (USD): {cost.get('total_cost_usd', 'N/A')}")
+            logger.info(f"Total Cost (KRW): {cost.get('total_cost_krw', 'N/A')}")
+        logger.info(f"Results saved to: {summary['output_path']}")
+        logger.info(f"Log saved to: {log_path}")
+        logger.info("=" * 60)
+
+        # Show completion message
+        if summary["successful"] == 0 and summary["failed"] > 0:
+            console.print(Panel.fit("❌ All inference requests failed!", style="bold red"))
+            raise typer.Exit(1)
+        elif summary["failed"] > 0:
+            success_rate = (summary["successful"] / summary["total"]) * 100
+            msg = f"⚠️  Completed with {summary['failed']} failures ({success_rate:.1f}% success rate)"
+            console.print(Panel.fit(msg, style="bold yellow"))
+        else:
+            console.print(Panel.fit("✓ Gemini batch inference completed successfully!", style="bold green"))
+
+    except Exception as e:
+        logger.error(f"Gemini batch inference failed: {e}")
+        console.print(f"[red]❌ Error: {e}[/red]")
+        import traceback
+
+        traceback.print_exc()
+        raise typer.Exit(1) from e
+
+
 @app.command("generate-prompt")
 def generate_prompt_cmd() -> None:
     """Generate prompt template from guideline CSV and car parts CSV."""
@@ -554,6 +868,180 @@ def generate_prompt_cmd() -> None:
         console.print()
         console.print(Panel.fit("✓ Prompt generation completed!", style="bold green"))
         console.print(f"\n[cyan]Generated file:[/cyan] {output}")
+
+    except Exception as e:
+        console.print(f"[red]❌ Error: {e}[/red]")
+        import traceback
+
+        traceback.print_exc()
+        raise typer.Exit(1) from e
+
+
+@app.command("resume-job")
+def resume_batch_job(
+    job_file: Annotated[Path, typer.Argument(help="Path to .job.json file from previous batch run")],
+    poll_interval: Annotated[int, typer.Option(help="Seconds between status checks")] = 30,
+) -> None:
+    """Resume a batch job and get results.
+
+    Use this to retrieve results from a previously started batch job.
+    The job file is automatically created when running gemini-batch.
+    """
+    import json
+
+    from dotenv import load_dotenv
+
+    load_dotenv()
+
+    console.print(Panel.fit("🔄 Resume Batch Job", style="bold magenta"))
+    console.print()
+
+    if not job_file.exists():
+        console.print(f"[red]❌ Job file not found: {job_file}[/red]")
+        raise typer.Exit(1)
+
+    # Load job info
+    with open(job_file, encoding="utf-8") as f:
+        job_info = json.load(f)
+
+    job_name = job_info["job_name"]
+    model = job_info["model"]
+    output_csv = Path(job_info["output_csv"])
+    prompt_version = job_info["prompt_version"]
+    request_keys = job_info["request_keys"]
+    use_vertex = job_info.get("use_vertex_ai", True)
+
+    console.print(f"[cyan]Job name: {job_name}[/cyan]")
+    console.print(f"[cyan]Model: {model}[/cyan]")
+    console.print(f"[cyan]Output: {output_csv}[/cyan]")
+    console.print(f"[cyan]Requests: {len(request_keys)}[/cyan]")
+    console.print()
+
+    # Setup logging
+    log_path = output_csv.with_suffix(".log")
+    logger.add(
+        log_path,
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {message}",
+        level="INFO",
+        rotation=None,
+        mode="a",  # Append to existing log
+    )
+
+    import os
+
+    from google import genai
+
+    # Initialize client
+    if use_vertex:
+        project = os.getenv("GOOGLE_CLOUD_PROJECT")
+        location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+
+        if model and model.startswith("gemini-3"):
+            location = "global"
+
+        if not project:
+            creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+            if creds_path and Path(creds_path).exists():
+                try:
+                    with open(creds_path, encoding="utf-8") as f:
+                        creds_data = json.load(f)
+                        project = creds_data.get("project_id")
+                except (OSError, json.JSONDecodeError):
+                    pass  # Ignore credential file read errors, will check project below
+
+        if not project:
+            console.print("[red]❌ GOOGLE_CLOUD_PROJECT not set[/red]")
+            raise typer.Exit(1)
+
+        client = genai.Client(vertexai=True, project=project, location=location)
+        console.print(f"[cyan]Using Vertex AI (project: {project})[/cyan]")
+    else:
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            console.print("[red]❌ GOOGLE_API_KEY not set[/red]")
+            raise typer.Exit(1)
+        client = genai.Client(api_key=api_key)
+
+    # Import helpers
+    from src.inference.gemini_batch import (
+        BatchTimingInfo,
+        create_csv_row_from_result,
+        parse_batch_results,
+        poll_batch_job,
+    )
+
+    try:
+        # Check job status first
+        console.print("[cyan]Checking job status...[/cyan]")
+        job = client.batches.get(name=job_name)
+
+        state = str(job.state) if hasattr(job, "state") else "UNKNOWN"
+        console.print(f"[cyan]Current state: {state}[/cyan]")
+
+        # If job is still running, poll for completion
+        if "SUCCEEDED" not in state and "FAILED" not in state and "CANCELLED" not in state:
+            console.print("[cyan]Job still running, waiting for completion...[/cyan]")
+            final_job, timing_info = poll_batch_job(
+                client=client,
+                job_name=job_name,
+                poll_interval=poll_interval,
+            )
+        else:
+            final_job = job
+            _ = BatchTimingInfo()  # Placeholder for future timing info usage
+
+        # Parse results
+        console.print("[cyan]Parsing batch results...[/cyan]")
+        results, cost_info = parse_batch_results(client, final_job, request_keys, use_vertex_ai=use_vertex)
+
+        # Save results to CSV
+        import csv
+
+        output_csv.parent.mkdir(parents=True, exist_ok=True)
+
+        fieldnames = [
+            "file_name",
+            "GT",
+            "model",
+            "prompt_version",
+            "area_name",
+            "sub_area",
+            "contamination_type",
+            "max_severity",
+            "success",
+            "error",
+            "raw_response",
+        ]
+
+        with open(output_csv, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+
+            successful = 0
+            failed = 0
+
+            for key, result in results.items():
+                row = create_csv_row_from_result(
+                    file_name=key,
+                    original_data={"file_name": key, "GT": ""},
+                    result=result,
+                    model_name=model,
+                    prompt_version=prompt_version,
+                )
+                writer.writerow(row)
+                if result.get("success"):
+                    successful += 1
+                else:
+                    failed += 1
+
+        console.print()
+        console.print(f"[green]✅ Results saved to: {output_csv}[/green]")
+        console.print(f"[green]   Successful: {successful}[/green]")
+        console.print(f"[red]   Failed: {failed}[/red]")
+
+        # Clean up job file
+        job_file.unlink()
+        console.print(f"[dim]Removed job file: {job_file}[/dim]")
 
     except Exception as e:
         console.print(f"[red]❌ Error: {e}[/red]")
