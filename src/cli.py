@@ -179,64 +179,94 @@ def single_inference(
 
 
 @app.command("batch-infer")
-def batch_inference(
-    input_csv: Annotated[Path | None, typer.Argument(help="Input CSV file with file_name and GT columns")] = None,
-    images_dir: Annotated[Path | None, typer.Argument(help="Directory containing images")] = None,
-    prompt: Annotated[Path | None, typer.Argument(help="Path to prompt file")] = None,
-    api_url: Annotated[
-        str | None,
-        typer.Option(help="VLM API endpoint URL (overrides --internal)"),
-    ] = None,
-    model: Annotated[str, typer.Option(help="Model name")] = "qwen3-vl-8b-instruct",
-    max_tokens: Annotated[
-        int | None, typer.Option(help="Maximum tokens to generate (default: server's max_model_len)")
-    ] = None,
-    temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
-    limit: Annotated[int | None, typer.Option(help="Maximum number of images to process (default: all)")] = None,
-    max_workers: Annotated[
-        int | None, typer.Option(help="Number of parallel workers (default: auto based on server replicas)")
-    ] = None,
-    workers_per_replica: Annotated[int, typer.Option(help="Workers per GPU replica for auto-scaling (default: 4)")] = 4,
-    internal: Annotated[bool, typer.Option("--internal", help="Use internal Kubernetes service URL")] = False,
-) -> None:
-    """Run batch inference on multiple images specified in CSV file."""
-    console.print(Panel.fit("🚗 Batch Inference", style="bold magenta"))
+def batch_inference_menu() -> None:
+    """Run batch inference on images - Interactive menu."""
+    from rich.box import ROUNDED
 
-    # Interactive input if arguments not provided
-    if input_csv is None:
-        console.print()
-        input_csv_str = Prompt.ask("[cyan]📄 Input CSV file path[/cyan]")
-        input_csv = _resolve_path(input_csv_str)
+    # Header
+    header_content = "[bold white]🚗 Batch Inference[/bold white]\n[dim]vLLM 서버를 사용한 배치 추론[/dim]"
+    console.print(Panel(header_content, style="magenta", box=ROUNDED))
+    console.print()
 
-    if images_dir is None:
-        images_dir_str = Prompt.ask("[cyan]📁 Images directory path[/cyan]")
-        images_dir = _resolve_path(images_dir_str)
+    # Menu options
+    menu_table = Table(
+        show_header=True,
+        header_style="bold cyan",
+        box=ROUNDED,
+        border_style="cyan",
+        padding=(0, 1),
+    )
+    menu_table.add_column("번호", justify="center", width=6)
+    menu_table.add_column("모드", width=20)
+    menu_table.add_column("설명", style="dim")
 
-    if prompt is None:
-        prompt_str = Prompt.ask("[cyan]📝 Prompt file path[/cyan]")
-        prompt = _resolve_path(prompt_str)
+    menu_table.add_row("[bold green]1[/]", "📄 CSV 모드", "CSV 파일 기반 추론 (GT 비교용)")
+    menu_table.add_row("[bold green]2[/]", "📁 폴더 모드", "폴더 내 모든 이미지 추론 (raw response 수집)")
+    menu_table.add_row("[bold red]0[/]", "🚪 종료", "종료")
 
-    # Ask for limit if not provided via CLI and in interactive mode
-    if limit is None:
-        limit_str = Prompt.ask("[cyan]🔢 Maximum number of images to process (press Enter for all)[/cyan]", default="")
-        if limit_str and limit_str.strip():
-            try:
-                limit = int(limit_str)
-            except ValueError:
-                console.print("[yellow]⚠️  Invalid number, processing all images[/yellow]")
-                limit = None
+    console.print(menu_table)
+    console.print()
 
-    # Ask for internal mode if api_url is not provided
+    # Get user choice
+    choice = Prompt.ask(
+        "[bold cyan]선택[/bold cyan]",
+        choices=["0", "1", "2"],
+        default="1",
+    )
+
+    console.print()
+
+    if choice == "0":
+        console.print("[yellow]Exiting...[/yellow]")
+        return
+    elif choice == "1":
+        _batch_infer_csv_mode()
+    elif choice == "2":
+        _batch_infer_folder_mode()
+
+
+def _batch_infer_csv_mode() -> None:
+    """Run batch inference with CSV input (for GT comparison)."""
+    console.print(Panel.fit("📄 CSV 모드 - GT 비교용 배치 추론", style="bold cyan"))
+    console.print()
+
+    # Initialize variables
+    model = "qwen3-vl-8b-instruct"
+    max_tokens: int | None = None
+    temperature = 0.0
+    limit: int | None = None
+    max_workers: int | None = None
+    api_url: str | None = None
+    internal = False
+
+    # Interactive input
+    input_csv_str = Prompt.ask("[cyan]📄 Input CSV file path[/cyan]")
+    input_csv = _resolve_path(input_csv_str)
+
+    images_dir_str = Prompt.ask("[cyan]📁 Images directory path[/cyan]")
+    images_dir = _resolve_path(images_dir_str)
+
+    prompt_str = Prompt.ask("[cyan]📝 Prompt file path[/cyan]")
+    prompt = _resolve_path(prompt_str)
+
+    # Ask for limit
+    limit_str = Prompt.ask("[cyan]🔢 Maximum number of images to process (press Enter for all)[/cyan]", default="")
+    if limit_str and limit_str.strip():
+        try:
+            limit = int(limit_str)
+        except ValueError:
+            console.print("[yellow]⚠️  Invalid number, processing all images[/yellow]")
+            limit = None
+
+    # Ask for internal mode
     namespace = "vllm-test"  # default
-    if api_url is None and not internal:
-        internal_str = Prompt.ask("[cyan]🔧 Running inside Kubernetes cluster? (y/N)[/cyan]", default="N")
-        internal = internal_str.strip().lower() in ["y", "yes"]
+    internal_str = Prompt.ask("[cyan]🔧 Running inside Kubernetes cluster? (y/N)[/cyan]", default="N")
+    internal = internal_str.strip().lower() in ["y", "yes"]
 
-    # Ask for namespace if api_url is not provided
-    if api_url is None:
-        namespace = Prompt.ask(
-            "[cyan]🏷️  Select namespace (vllm / vllm-test)[/cyan]", choices=["vllm", "vllm-test"], default="vllm-test"
-        )
+    # Ask for namespace
+    namespace = Prompt.ask(
+        "[cyan]🏷️  Select namespace (vllm / vllm-test)[/cyan]", choices=["vllm", "vllm-test"], default="vllm-test"
+    )
 
     console.print()
 
@@ -272,8 +302,7 @@ def batch_inference(
     logger.info(f"Logging to {log_path}")
 
     # Determine API URL
-    if api_url is None:
-        api_url = _get_api_url(internal, model, namespace)
+    api_url = _get_api_url(internal, model, namespace)
 
     # Check server health with cold start support (KEDA may have scaled to 0)
     console.print(f"[cyan]🌐 API URL: {api_url}[/cyan]")
@@ -321,18 +350,16 @@ def batch_inference(
     server_max_model_len = model_info.get("max_model_len") if model_info else None
 
     # Set workers - default 12 for prefix caching optimization
-    if max_workers is None:
-        max_workers = 12  # Optimized for prefix caching with A100 40GB
-        console.print(f"[cyan]ℹ️  Using {max_workers} workers (prefix caching enabled)[/cyan]")
-        console.print()
-        logger.info(f"Using {max_workers} workers")
+    max_workers = 12  # Optimized for prefix caching with A100 40GB
+    console.print(f"[cyan]ℹ️  Using {max_workers} workers (prefix caching enabled)[/cyan]")
+    console.print()
+    logger.info(f"Using {max_workers} workers")
 
     # If max_tokens not specified, use a reasonable default (not max_model_len!)
     # max_model_len is total context (input + output), so we can't use it all for output
-    if max_tokens is None:
-        max_tokens = 1000  # reasonable default for output tokens
-        console.print(f"[cyan]ℹ️  Using default max_tokens: {max_tokens}[/cyan]")
-        console.print()
+    max_tokens = 1000  # reasonable default for output tokens
+    console.print(f"[cyan]ℹ️  Using default max_tokens: {max_tokens}[/cyan]")
+    console.print()
 
     # Log configuration
     logger.info("=" * 60)
@@ -477,6 +504,272 @@ def batch_inference(
         else:
             console.print(Panel.fit("✓ Batch inference completed successfully!", style="bold green"))
 
+    except typer.Exit:
+        raise
+    except Exception as e:
+        logger.error(f"Batch inference failed with error: {e}")
+        console.print(f"[red]❌ Error: {e}[/red]")
+        import traceback
+
+        traceback.print_exc()
+        raise typer.Exit(1) from e
+
+
+def _batch_infer_folder_mode() -> None:
+    """Run batch inference on all images in a folder (raw response collection)."""
+    import json
+    from concurrent.futures import ThreadPoolExecutor
+
+    from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
+
+    from src.inference.batch import load_prompt, process_image
+
+    console.print(Panel.fit("📁 폴더 모드 - Raw Response 수집", style="bold cyan"))
+    console.print()
+
+    # Initialize variables
+    model = "qwen3-vl-8b-instruct"
+    max_tokens = 1000
+    temperature = 0.0
+    limit: int | None = None
+    max_workers = 12
+    api_url: str | None = None
+    internal = False
+
+    # Interactive input
+    images_dir_str = Prompt.ask("[cyan]📁 Images directory path[/cyan]")
+    images_dir = _resolve_path(images_dir_str)
+
+    prompt_str = Prompt.ask("[cyan]📝 Prompt file path[/cyan]")
+    prompt = _resolve_path(prompt_str)
+
+    # Ask for limit
+    limit_str = Prompt.ask("[cyan]🔢 Maximum number of images to process (press Enter for all)[/cyan]", default="")
+    if limit_str and limit_str.strip():
+        try:
+            limit = int(limit_str)
+        except ValueError:
+            console.print("[yellow]⚠️  Invalid number, processing all images[/yellow]")
+            limit = None
+
+    # Ask for internal mode
+    namespace = "vllm-test"  # default
+    internal_str = Prompt.ask("[cyan]🔧 Running inside Kubernetes cluster? (y/N)[/cyan]", default="N")
+    internal = internal_str.strip().lower() in ["y", "yes"]
+
+    # Ask for namespace
+    namespace = Prompt.ask(
+        "[cyan]🏷️  Select namespace (vllm / vllm-test)[/cyan]", choices=["vllm", "vllm-test"], default="vllm-test"
+    )
+
+    console.print()
+
+    # Validate paths
+    if not images_dir.exists():
+        console.print(f"[red]❌ Error: Images directory not found: {images_dir}[/red]")
+        raise typer.Exit(1)
+
+    if not prompt.exists():
+        console.print(f"[red]❌ Error: Prompt file not found: {prompt}[/red]")
+        raise typer.Exit(1)
+
+    # Find all image files in the directory
+    image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
+    image_files = [f for f in images_dir.iterdir() if f.is_file() and f.suffix.lower() in image_extensions]
+    image_files.sort()
+
+    if not image_files:
+        console.print(f"[red]❌ Error: No image files found in {images_dir}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[green]Found {len(image_files)} image files[/green]")
+
+    # Apply limit if specified
+    if limit is not None and limit > 0:
+        image_files = image_files[:limit]
+        console.print(f"[cyan]Processing first {len(image_files)} images (limit applied)[/cyan]")
+
+    # Auto-generate output path
+    prompt_name = prompt.stem
+    dataset_name = images_dir.parent.name if images_dir.name == "images" else images_dir.name
+    from datetime import datetime
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_json = Path("results") / f"{dataset_name}_{prompt_name}_{timestamp}_raw.json"
+    output_json.parent.mkdir(parents=True, exist_ok=True)
+
+    # Setup logging
+    log_path = output_json.with_suffix(".log")
+    logger.add(
+        log_path,
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {message}",
+        level="INFO",
+        rotation=None,
+        mode="w",
+    )
+    logger.info(f"Logging to {log_path}")
+
+    # Determine API URL
+    api_url = _get_api_url(internal, model, namespace)
+
+    # Check server health
+    console.print(f"[cyan]🌐 API URL: {api_url}[/cyan]")
+    console.print("Checking server health...")
+    temp_client = VLMClient(api_url=api_url, model=model)
+    health_result = temp_client.check_health(timeout=10)
+
+    if not health_result["healthy"]:
+        console.print("[yellow]⏳ Server not ready (may be scaled to zero). Waiting for cold start...[/yellow]")
+        console.print("[yellow]   This can take 5-10 minutes for GPU pod startup + model loading[/yellow]")
+        logger.info("Server not ready, waiting for cold start...")
+
+        max_wait = 900
+        wait_interval = 30
+        elapsed = 0
+
+        with console.status("[yellow]Waiting for server...[/yellow]") as status:
+            while elapsed < max_wait:
+                time.sleep(wait_interval)
+                elapsed += wait_interval
+                health_result = temp_client.check_health(timeout=30)
+
+                if health_result["healthy"]:
+                    console.print(f"\n[green]✓ Server is now ready after {elapsed}s![/green]")
+                    logger.info(f"Server ready after {elapsed}s cold start")
+                    break
+
+                status.update(f"[yellow]Waiting for server... ({elapsed}s / {max_wait}s)[/yellow]")
+                logger.info(f"Still waiting for server... {elapsed}s elapsed")
+            else:
+                console.print(f"\n[red]❌ Server did not become ready after {max_wait}s[/red]")
+                console.print("[red]   Check if GPU nodes are available and KEDA is working[/red]")
+                raise typer.Exit(1)
+    else:
+        console.print(f"[green]✓ Server is healthy (response time: {health_result['response_time']:.2f}s)[/green]")
+
+    console.print()
+
+    # Display configuration
+    config_table = Table(title="⚙️  Configuration", show_header=False, box=None)
+    config_table.add_column("Key", style="cyan", width=20)
+    config_table.add_column("Value", style="white")
+
+    config_table.add_row("📁 Images directory", str(images_dir))
+    config_table.add_row("📝 Prompt file", str(prompt))
+    config_table.add_row("💾 Output JSON", str(output_json))
+    config_table.add_row("🌐 API URL", api_url)
+    config_table.add_row("🤖 Model", model)
+    config_table.add_row("🔢 Max Tokens", str(max_tokens))
+    config_table.add_row("⚡ Workers", str(max_workers))
+    config_table.add_row("📊 Images to process", str(len(image_files)))
+
+    console.print(config_table)
+    console.print()
+
+    # Load prompt
+    prompt_text = load_prompt(prompt)
+    prompt_version = prompt.stem
+
+    # Initialize client
+    client = VLMClient(api_url=api_url, model=model)
+
+    # Process images
+    results: list[dict] = []
+    successful_count = 0
+    failed_count = 0
+    total_start_time = time.time()
+
+    try:
+        with Progress(
+            TextColumn("[bold blue]{task.description}"),
+            BarColumn(bar_width=40),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TextColumn("({task.completed}/{task.total})"),
+            TextColumn("•"),
+            TimeRemainingColumn(),
+            refresh_per_second=2,
+        ) as progress:
+            process_task = progress.add_task("Processing", total=len(image_files))
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+
+                def process_single(image_path: Path) -> dict:
+                    inference_result = process_image(
+                        client,
+                        str(image_path),
+                        prompt_text,
+                        max_tokens,
+                        temperature,
+                        image_path.name,
+                        "system",
+                    )
+                    return {
+                        "image_name": image_path.name,
+                        "success": inference_result["success"],
+                        "latency": inference_result.get("latency", 0),
+                        "result": inference_result.get("result"),
+                        "error": inference_result.get("error"),
+                        "raw_response": inference_result.get("raw_response"),
+                    }
+
+                for result in executor.map(process_single, image_files):
+                    results.append(result)
+                    if result["success"]:
+                        successful_count += 1
+                    else:
+                        failed_count += 1
+                    progress.update(process_task, advance=1)
+
+        total_elapsed_time = time.time() - total_start_time
+
+        # Save results to JSON
+        output_data = {
+            "metadata": {
+                "model": model,
+                "prompt_version": prompt_version,
+                "images_dir": str(images_dir),
+                "total_images": len(image_files),
+                "successful": successful_count,
+                "failed": failed_count,
+                "total_time_seconds": total_elapsed_time,
+                "timestamp": datetime.now().isoformat(),
+            },
+            "results": results,
+        }
+
+        with open(output_json, "w", encoding="utf-8") as f:
+            json.dump(output_data, f, ensure_ascii=False, indent=2)
+
+        # Display summary
+        console.print()
+        summary_table = Table(title="📊 Summary", show_header=False, box=None)
+        summary_table.add_column("Key", style="cyan", width=25)
+        summary_table.add_column("Value", style="white")
+
+        throughput = len(image_files) / total_elapsed_time if total_elapsed_time > 0 else 0
+
+        summary_table.add_row("🖼️  Total images", str(len(image_files)))
+        summary_table.add_row("✅ Successful", f"[green]{successful_count}[/green]")
+        summary_table.add_row("❌ Failed", f"[red]{failed_count}[/red]")
+        summary_table.add_row("⏱️  Total time", f"[bold yellow]{total_elapsed_time:.2f}s[/bold yellow]")
+        summary_table.add_row("🚀 Throughput", f"[bold magenta]{throughput:.2f} images/sec[/bold magenta]")
+        summary_table.add_row("💾 Results saved to", str(output_json))
+
+        console.print(summary_table)
+        console.print()
+
+        if failed_count == 0:
+            console.print(Panel.fit("✓ Batch inference completed successfully!", style="bold green"))
+        elif successful_count == 0:
+            console.print(Panel.fit("❌ All inference requests failed!", style="bold red"))
+            raise typer.Exit(1)
+        else:
+            success_rate = (successful_count / len(image_files)) * 100
+            msg = f"⚠️  Completed with {failed_count} failures ({success_rate:.1f}% success rate)"
+            console.print(Panel.fit(msg, style="bold yellow"))
+
+    except typer.Exit:
+        raise
     except Exception as e:
         logger.error(f"Batch inference failed with error: {e}")
         console.print(f"[red]❌ Error: {e}[/red]")
