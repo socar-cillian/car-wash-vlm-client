@@ -303,16 +303,20 @@ class VLMClient:
             image_name = Path(image_input).name if not image_input.startswith("http") else "url_image"
 
         # Build request payload
+        # System prompt is separated for vLLM prefix caching optimization
         payload = {
             "model": self.model,
             "messages": [
                 {
+                    "role": "system",
+                    "content": prompt,
+                },
+                {
                     "role": "user",
                     "content": [
                         {"type": "image_url", "image_url": {"url": image_url}},
-                        {"type": "text", "text": prompt},
                     ],
-                }
+                },
             ],
             "max_tokens": max_tokens,
             "temperature": temperature,
