@@ -463,34 +463,59 @@ def count_tokens_for_batch(
 class BatchTimingInfo:
     """Timing information for batch job."""
 
-    job_submitted_at: datetime | None = None  # When we submitted the job
-    job_started_at: datetime | None = None  # When batch actually started processing
-    job_completed_at: datetime | None = None  # When batch finished
+    # Local timestamps (when our code executed)
+    cli_started_at: datetime | None = None  # When CLI command started
+    job_submitted_at: datetime | None = None  # When we submitted the job to API
+    polling_started_at: datetime | None = None  # When we started polling
+    job_completed_at: datetime | None = None  # When we detected completion
+
+    # API-provided timestamps (from batch job object)
+    api_create_time: datetime | None = None  # When API created the job
+    api_start_time: datetime | None = None  # When API started processing
+    api_end_time: datetime | None = None  # When API finished processing
+    api_update_time: datetime | None = None  # Last update time from API
 
     def to_dict(self) -> dict[str, str]:
         """Convert timing info to dictionary with ISO format strings."""
-        return {
+        result = {
+            # Local timestamps
+            "cli_started_at": (self.cli_started_at.isoformat() if self.cli_started_at else ""),
             "job_submitted_at": (self.job_submitted_at.isoformat() if self.job_submitted_at else ""),
-            "job_started_at": (self.job_started_at.isoformat() if self.job_started_at else ""),
+            "polling_started_at": (self.polling_started_at.isoformat() if self.polling_started_at else ""),
             "job_completed_at": (self.job_completed_at.isoformat() if self.job_completed_at else ""),
-            "total_duration_seconds": (str(self.total_duration_seconds) if self.total_duration_seconds else ""),
-            "actual_processing_seconds": (
-                str(self.actual_processing_seconds) if self.actual_processing_seconds else ""
+            # API timestamps
+            "api_create_time": (self.api_create_time.isoformat() if self.api_create_time else ""),
+            "api_start_time": (self.api_start_time.isoformat() if self.api_start_time else ""),
+            "api_end_time": (self.api_end_time.isoformat() if self.api_end_time else ""),
+            "api_update_time": (self.api_update_time.isoformat() if self.api_update_time else ""),
+            # Computed durations
+            "total_cli_duration_seconds": (
+                str(self.total_cli_duration_seconds) if self.total_cli_duration_seconds else ""
             ),
+            "api_processing_seconds": (str(self.api_processing_seconds) if self.api_processing_seconds else ""),
+            "queue_wait_seconds": (str(self.queue_wait_seconds) if self.queue_wait_seconds else ""),
         }
+        return result
 
     @property
-    def total_duration_seconds(self) -> float | None:
-        """Total time from submission to completion."""
-        if self.job_submitted_at and self.job_completed_at:
-            return (self.job_completed_at - self.job_submitted_at).total_seconds()
+    def total_cli_duration_seconds(self) -> float | None:
+        """Total time from CLI start to completion detection."""
+        if self.cli_started_at and self.job_completed_at:
+            return (self.job_completed_at - self.cli_started_at).total_seconds()
         return None
 
     @property
-    def actual_processing_seconds(self) -> float | None:
-        """Actual processing time (from start to completion)."""
-        if self.job_started_at and self.job_completed_at:
-            return (self.job_completed_at - self.job_started_at).total_seconds()
+    def api_processing_seconds(self) -> float | None:
+        """Actual processing time reported by API (start to end)."""
+        if self.api_start_time and self.api_end_time:
+            return (self.api_end_time - self.api_start_time).total_seconds()
+        return None
+
+    @property
+    def queue_wait_seconds(self) -> float | None:
+        """Time spent waiting in queue (create to start)."""
+        if self.api_create_time and self.api_start_time:
+            return (self.api_start_time - self.api_create_time).total_seconds()
         return None
 
 
@@ -596,7 +621,7 @@ def create_batch_request(
     image_path: Path,
     prompt: str,
     request_key: str,
-    max_tokens: int = 1000,
+    max_tokens: int = 2000,
     temperature: float = 0.0,
 ) -> dict[str, Any]:
     """
@@ -639,7 +664,7 @@ def create_batch_request_with_gcs_uri(
     gcs_uri: str,
     prompt: str,
     request_key: str,
-    max_tokens: int = 1000,
+    max_tokens: int = 2000,
     temperature: float = 0.0,
 ) -> dict[str, Any]:
     """
@@ -684,7 +709,7 @@ def create_batch_request_with_gcs_uri(
 def create_inline_batch_request(
     image_path: Path,
     prompt: str,
-    max_tokens: int = 1000,
+    max_tokens: int = 2000,
     temperature: float = 0.0,
 ) -> dict[str, Any]:
     """
@@ -727,7 +752,7 @@ def prepare_inline_batch_requests(
     image_data: list[dict[str, str]],
     images_dir: Path,
     prompt: str,
-    max_tokens: int = 1000,
+    max_tokens: int = 2000,
     temperature: float = 0.0,
 ) -> tuple[list[dict[str, Any]], list[str], list[str]]:
     """
@@ -775,7 +800,7 @@ def prepare_batch_requests_file(
     images_dir: Path,
     prompt: str,
     output_jsonl: Path,
-    max_tokens: int = 1000,
+    max_tokens: int = 2000,
     temperature: float = 0.0,
 ) -> tuple[list[str], list[str]]:
     """
@@ -825,7 +850,7 @@ def prepare_batch_requests_file_from_gcs(
     gcs_image_uris: list[str],
     prompt: str,
     output_jsonl: Path,
-    max_tokens: int = 1000,
+    max_tokens: int = 2000,
     temperature: float = 0.0,
 ) -> list[str]:
     """
@@ -866,11 +891,25 @@ def prepare_batch_requests_file_from_gcs(
     return request_keys
 
 
+def _extract_api_timing(job: Any, timing: BatchTimingInfo) -> None:
+    """Extract timing information from batch job object."""
+    # Try to get API-provided timestamps
+    if hasattr(job, "create_time") and job.create_time:
+        timing.api_create_time = job.create_time
+    if hasattr(job, "start_time") and job.start_time:
+        timing.api_start_time = job.start_time
+    if hasattr(job, "end_time") and job.end_time:
+        timing.api_end_time = job.end_time
+    if hasattr(job, "update_time") and job.update_time:
+        timing.api_update_time = job.update_time
+
+
 def poll_batch_job(
     client: genai.Client,
     job_name: str,
     poll_interval: int = 30,
     max_wait: int = 86400,  # 24 hours
+    timing: BatchTimingInfo | None = None,
 ) -> tuple[Any, BatchTimingInfo]:
     """
     Poll batch job status until completion.
@@ -880,11 +919,14 @@ def poll_batch_job(
         job_name: Name of the batch job
         poll_interval: Seconds between status checks
         max_wait: Maximum seconds to wait
+        timing: Optional existing timing info to update
 
     Returns:
         Tuple of (final job object, timing info)
     """
-    timing = BatchTimingInfo(job_submitted_at=datetime.now(UTC))
+    if timing is None:
+        timing = BatchTimingInfo()
+    timing.polling_started_at = datetime.now(UTC)
 
     completed_states = {
         "JOB_STATE_SUCCEEDED",
@@ -895,7 +937,6 @@ def poll_batch_job(
 
     elapsed = 0
     job = None
-    job_started = False
 
     with Progress(
         SpinnerColumn(),
@@ -914,11 +955,8 @@ def poll_batch_job(
                 job = client.batches.get(name=job_name)
                 state = str(job.state) if hasattr(job, "state") else "UNKNOWN"
 
-                # Check if job started processing
-                if not job_started and state == "JOB_STATE_RUNNING":
-                    timing.job_started_at = datetime.now(UTC)
-                    job_started = True
-                    progress.update(task, description="Batch job processing...")
+                # Extract API timing on each poll (will be updated as job progresses)
+                _extract_api_timing(job, timing)
 
                 # Check for completion
                 if state in completed_states:
@@ -926,19 +964,27 @@ def poll_batch_job(
                     progress.update(task, completed=100, description=f"Batch job {state}")
                     break
 
+                # Update progress description based on state
+                if state == "JOB_STATE_RUNNING":
+                    progress.update(task, description=f"Processing... ({elapsed}s)")
+                elif state == "JOB_STATE_PENDING":
+                    progress.update(task, description=f"Queued... ({elapsed}s)")
+                else:
+                    progress.update(task, description=f"{state} ({elapsed}s)")
+
                 # Update progress based on elapsed time (estimate)
                 progress_pct = min(95, (elapsed / max_wait) * 100)
-                progress.update(
-                    task,
-                    completed=progress_pct,
-                    description=f"Batch job {state} ({elapsed}s elapsed)",
-                )
+                progress.update(task, completed=progress_pct)
 
             except Exception as e:
                 console.print(f"[yellow]Warning: Error checking job status: {e}[/yellow]")
 
             time.sleep(poll_interval)
             elapsed += poll_interval
+
+    # Final extraction of timing info
+    if job:
+        _extract_api_timing(job, timing)
 
     return job, timing
 
@@ -1124,12 +1170,13 @@ def run_gemini_batch_inference(
     prompt_path: Path,
     output_csv: Path,
     model: str | None = None,
-    max_tokens: int = 1000,
+    max_tokens: int = 2000,
     temperature: float = 0.0,
     skip_confirmation: bool = False,
     limit: int | None = None,
     poll_interval: int = 30,
     gcs_bucket: str | None = None,
+    wait_for_completion: bool = False,
 ) -> dict[str, Any]:
     """
     Run batch inference using Gemini Batch API.
@@ -1145,6 +1192,7 @@ def run_gemini_batch_inference(
         limit: Maximum number of images to process
         poll_interval: Seconds between status checks
         gcs_bucket: GCS bucket name for Vertex AI batch jobs (defaults to env GCS_BUCKET_NAME)
+        wait_for_completion: Whether to wait for job completion (default: False)
 
     Returns:
         Dictionary with summary statistics
@@ -1154,6 +1202,9 @@ def run_gemini_batch_inference(
         - If input_csv is None and images_dir is a GCS path, all images in the GCS path will be processed
         - GCS images use file_uri in batch requests (more efficient than base64)
     """
+    # Initialize timing info
+    timing_info = BatchTimingInfo(cli_started_at=datetime.now(UTC))
+
     # Get configuration from environment
     api_key = os.getenv("GOOGLE_API_KEY")
     use_vertex = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "FALSE").upper() == "TRUE"
@@ -1425,8 +1476,9 @@ def run_gemini_batch_inference(
     # Prepare batch requests
     console.print("[cyan]Preparing batch requests...[/cyan]")
 
-    # Variables for cleanup
+    # Variables for cleanup and logging
     gcs_input_uri: str | None = None
+    gcs_output_uri: str | None = None
     temp_jsonl_path: Path | None = None
 
     # skipped_files tracking
@@ -1502,10 +1554,18 @@ def run_gemini_batch_inference(
         console.print(f"[green]Uploaded to {gcs_input_uri}[/green]")
 
         # Create batch job with GCS URI
+        # Explicitly specify output destination for cleaner organization
+        gcs_output_uri = f"gs://{gcs_bucket}/{gcs_prefix}gemini-batch/{job_id}/output/"
         console.print("[cyan]Creating batch job...[/cyan]")
+        console.print(f"[dim]  Input:  {gcs_input_uri}[/dim]")
+        console.print(f"[dim]  Output: {gcs_output_uri}[/dim]")
         batch_job = client.batches.create(
             model=model,
             src=gcs_input_uri,
+            config=types.CreateBatchJobConfig(
+                display_name=job_id,
+                dest=gcs_output_uri,
+            ),
         )
 
     else:
@@ -1541,9 +1601,15 @@ def run_gemini_batch_inference(
     job_name = batch_job.name
     if not job_name:
         raise RuntimeError("Batch job creation failed: no job name returned")
+
+    # Record job submission time
+    timing_info.job_submitted_at = datetime.now(UTC)
     console.print(f"[green]Created batch job: {job_name}[/green]")
 
-    # Save job info to file for later resume
+    # Extract initial API timing from batch_job
+    _extract_api_timing(batch_job, timing_info)
+
+    # Save job info to file for later resume (includes timing)
     job_info_file = output_csv.with_suffix(".job.json")
     job_info = {
         "job_name": job_name,
@@ -1552,13 +1618,58 @@ def run_gemini_batch_inference(
         "prompt_version": prompt_version,
         "num_requests": len(request_keys),
         "request_keys": request_keys,
-        "created_at": datetime.now(UTC).isoformat(),
         "use_vertex_ai": use_vertex,
+        "timing": timing_info.to_dict(),
+        "gcs_input_uri": gcs_input_uri,
+        "gcs_output_uri": gcs_output_uri,
+        "cost_estimate": cost_estimate,
     }
     with open(job_info_file, "w", encoding="utf-8") as f:
         json.dump(job_info, f, indent=2)
-    console.print(f"[cyan]Job info saved to: {job_info_file}[/cyan]")
-    console.print(f"[cyan]To resume later: carwash resume-job {job_info_file}[/cyan]")
+
+    # Display job summary
+    console.print()
+    console.print("[bold green]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold green]")
+    console.print("[bold green]✅ 배치 작업이 제출되었습니다![/bold green]")
+    console.print("[bold green]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold green]")
+    console.print()
+
+    summary_table = Table(show_header=False, box=None)
+    summary_table.add_column("Key", style="cyan", width=20)
+    summary_table.add_column("Value", style="white")
+
+    summary_table.add_row("🆔 Job ID", job_name.split("/")[-1])
+    summary_table.add_row("🤖 모델", model)
+    summary_table.add_row("📷 이미지 수", f"{len(request_keys):,}개")
+    summary_table.add_row("📝 프롬프트", prompt_version)
+    summary_table.add_row("", "")
+    summary_table.add_row("📥 GCS Input", gcs_input_uri or "N/A")
+    summary_table.add_row("📤 GCS Output", gcs_output_uri or "N/A")
+    summary_table.add_row("", "")
+    summary_table.add_row("💰 예상 비용 (USD)", f"${cost_estimate['estimated_total_cost_usd']:.4f}")
+    summary_table.add_row("💴 예상 비용 (KRW)", f"₩{cost_estimate['estimated_total_cost_krw']:,.0f}")
+    summary_table.add_row("", "")
+    summary_table.add_row("📁 Job 파일", str(job_info_file))
+    summary_table.add_row("📊 결과 CSV", str(output_csv))
+
+    console.print(summary_table)
+    console.print()
+    console.print("[yellow]📌 작업 완료 후 결과 가져오기:[/yellow]")
+    console.print(f"   [dim]carwash gemini-batch → 2 (resume) → {job_info_file}[/dim]")
+    console.print()
+
+    # If not waiting for completion, return early
+    if not wait_for_completion:
+        return {
+            "job_name": job_name,
+            "job_info_file": str(job_info_file),
+            "model": model,
+            "num_requests": len(request_keys),
+            "gcs_input_uri": gcs_input_uri,
+            "gcs_output_uri": gcs_output_uri,
+            "cost_estimate": cost_estimate,
+            "status": "submitted",
+        }
 
     # Poll for completion
     console.print("[cyan]Waiting for batch job to complete (this may take up to 24 hours)...[/cyan]")
@@ -1566,6 +1677,7 @@ def run_gemini_batch_inference(
         client=client,
         job_name=job_name,
         poll_interval=poll_interval,
+        timing=timing_info,
     )
 
     # Check job status
@@ -1736,6 +1848,87 @@ def run_gemini_batch_inference(
     #     except Exception as e:
     #         console.print(f"[yellow]Warning: Could not delete GCS input: {e}[/yellow]")
 
+    # Save final job log with all timing, cost, and token info to logs folder
+    logs_dir = output_csv.parent / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    job_log_file = logs_dir / f"{output_csv.stem}.log.json"
+
+    job_log = {
+        "job_name": job_name,
+        "model": model,
+        "prompt_version": prompt_version,
+        "use_vertex_ai": use_vertex,
+        # Request counts
+        "num_requests": len(request_keys),
+        "successful": successful_count,
+        "failed": failed_count,
+        "skipped": len(skipped_files),
+        # Token usage
+        "tokens": {
+            "total_input_tokens": cost_info.input_tokens,
+            "total_output_tokens": cost_info.output_tokens,
+            "total_tokens": cost_info.input_tokens + cost_info.output_tokens,
+            "avg_input_tokens_per_request": (cost_info.input_tokens // len(request_keys) if request_keys else 0),
+            "avg_output_tokens_per_request": (
+                cost_info.output_tokens // successful_count if successful_count > 0 else 0
+            ),
+        },
+        # Cost breakdown
+        "cost": {
+            "input_cost_usd": cost_info.input_cost_usd,
+            "output_cost_usd": cost_info.output_cost_usd,
+            "total_cost_usd": cost_info.total_cost_usd,
+            "total_cost_krw": cost_info.total_cost_krw,
+            "cost_per_request_usd": (cost_info.total_cost_usd / len(request_keys) if request_keys else 0),
+            "pricing_tier": "batch_50_percent_discount",
+        },
+        # Timing
+        "timing": timing_info.to_dict(),
+        # GCS URIs
+        "gcs": {
+            "input_uri": gcs_input_uri,
+            "output_uri": gcs_output_uri,
+        }
+        if use_vertex
+        else None,
+        # Output paths
+        "output_csv": str(output_csv),
+    }
+    with open(job_log_file, "w", encoding="utf-8") as f:
+        json.dump(job_log, f, indent=2, ensure_ascii=False)
+    console.print(f"[cyan]Job log saved to: {job_log_file}[/cyan]")
+
+    # Display timing summary
+    console.print()
+    console.print("[bold cyan]━━━ Timing Summary ━━━[/bold cyan]")
+    timing_table = Table(show_header=False, box=None)
+    timing_table.add_column("Key", style="cyan", width=30)
+    timing_table.add_column("Value", style="white")
+
+    if timing_info.cli_started_at:
+        timing_table.add_row("🚀 CLI started", timing_info.cli_started_at.strftime("%Y-%m-%d %H:%M:%S UTC"))
+    if timing_info.job_submitted_at:
+        timing_table.add_row("📤 Job submitted", timing_info.job_submitted_at.strftime("%Y-%m-%d %H:%M:%S UTC"))
+    if timing_info.api_create_time:
+        timing_table.add_row("📝 API create time", timing_info.api_create_time.strftime("%Y-%m-%d %H:%M:%S UTC"))
+    if timing_info.api_start_time:
+        timing_table.add_row("▶️  API start time", timing_info.api_start_time.strftime("%Y-%m-%d %H:%M:%S UTC"))
+    if timing_info.api_end_time:
+        timing_table.add_row("⏹️  API end time", timing_info.api_end_time.strftime("%Y-%m-%d %H:%M:%S UTC"))
+    if timing_info.job_completed_at:
+        timing_table.add_row("✅ Completed at", timing_info.job_completed_at.strftime("%Y-%m-%d %H:%M:%S UTC"))
+
+    timing_table.add_row("", "")
+    if timing_info.queue_wait_seconds:
+        timing_table.add_row("⏳ Queue wait", f"{timing_info.queue_wait_seconds:.1f}s")
+    if timing_info.api_processing_seconds:
+        timing_table.add_row("⚙️  API processing", f"{timing_info.api_processing_seconds:.1f}s")
+    if timing_info.total_cli_duration_seconds:
+        timing_table.add_row("⏱️  Total duration", f"{timing_info.total_cli_duration_seconds:.1f}s")
+
+    console.print(timing_table)
+    console.print()
+
     # Prepare summary
     return {
         "total": len(request_keys) + len(skipped_files),
@@ -1745,4 +1938,5 @@ def run_gemini_batch_inference(
         "timing": timing_info.to_dict(),
         "cost": cost_info.to_dict(),
         "model": model,
+        "job_log_file": str(job_log_file),
     }

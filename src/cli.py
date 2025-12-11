@@ -13,7 +13,7 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from src.api import VLMClient
-from src.inference import run_batch_inference, run_gemini_batch_inference
+from src.inference import parse_batch_output, run_batch_inference, run_gemini_batch_inference
 from src.prompts import generate_prompt, parse_guideline
 
 
@@ -320,11 +320,10 @@ def batch_inference(
     model_info = temp_client.get_model_info()
     server_max_model_len = model_info.get("max_model_len") if model_info else None
 
-    # Set workers based on pod count
-    # Currently using 1 pod with 4 workers per pod
+    # Set workers - default 12 for prefix caching optimization
     if max_workers is None:
-        max_workers = 4  # Fixed: 1 pod × 4 workers per pod
-        console.print(f"[cyan]ℹ️  Using {max_workers} workers (1 pod × 4 workers)[/cyan]")
+        max_workers = 12  # Optimized for prefix caching with A100 40GB
+        console.print(f"[cyan]ℹ️  Using {max_workers} workers (prefix caching enabled)[/cyan]")
         console.print()
         logger.info(f"Using {max_workers} workers")
 
@@ -487,38 +486,27 @@ def batch_inference(
         raise typer.Exit(1) from e
 
 
-@app.command("gemini-batch")
-def gemini_batch_inference(
-    input_csv: Annotated[
-        Path | None, typer.Argument(help="Input CSV file with file_name column (optional for GCS)")
-    ] = None,
-    images_dir: Annotated[str | None, typer.Argument(help="Images path (local dir or GCS: gs://bucket/path)")] = None,
-    prompt: Annotated[Path | None, typer.Argument(help="Path to prompt file")] = None,
-    model: Annotated[str | None, typer.Option(help="Model name (default: from .env MODEL_NAME)")] = None,
-    max_tokens: Annotated[int, typer.Option(help="Maximum tokens to generate")] = 1000,
-    temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
-    limit: Annotated[int | None, typer.Option(help="Maximum number of images to process (default: all)")] = None,
-    poll_interval: Annotated[int, typer.Option(help="Seconds between status checks")] = 30,
-    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip cost confirmation prompt")] = False,
-    gcs_bucket: Annotated[
-        str | None,
-        typer.Option("--gcs-bucket", help="GCS bucket name for Vertex AI batch jobs"),
-    ] = None,
-) -> None:
-    """Run batch inference using Gemini Batch API (50% cost savings).
-
-    Supports both local images and GCS images:
-    - Local: carwash gemini-batch input.csv ./images prompt.txt
-    - GCS: carwash gemini-batch gs://bucket/path/images prompt.txt
-    - GCS with CSV filter: carwash gemini-batch input.csv gs://bucket/path prompt.txt
-    """
+def _gemini_batch_infer() -> None:
+    """Run batch inference using Gemini Batch API (50% cost savings)."""
     console.print(Panel.fit("🚀 Gemini Batch Inference", style="bold magenta"))
     console.print()
     console.print("[cyan]Using Gemini Batch API for 50% cost savings[/cyan]")
     console.print("[cyan]Note: Batch jobs may take up to 24 hours to complete[/cyan]")
     console.print()
 
-    # Interactive input if arguments not provided
+    # Initialize parameters
+    input_csv: Path | None = None
+    images_dir: str | None = None
+    prompt: Path | None = None
+    model: str | None = None
+    max_tokens: int = 1000
+    temperature: float = 0.0
+    limit: int | None = None
+    poll_interval: int = 30
+    yes: bool = False
+    gcs_bucket: str | None = None
+
+    # Interactive input
     if images_dir is None:
         images_dir_str = Prompt.ask("[cyan]📁 Images path (local dir or GCS: gs://bucket/path)[/cyan]")
         images_dir = images_dir_str
@@ -618,7 +606,11 @@ def gemini_batch_inference(
         local_dir = Path(images_dir_str)
         dataset_name = local_dir.parent.name if local_dir.name == "images" else local_dir.name
     model_suffix = model.replace("-", "_") if model else "gemini"
-    output = Path("results") / f"{dataset_name}_{prompt_name}_{model_suffix}_batch_result.csv"
+    # Add timestamp to output filename
+    from datetime import datetime
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output = Path("results") / f"{dataset_name}_{prompt_name}_{model_suffix}_{timestamp}.csv"
     output.parent.mkdir(parents=True, exist_ok=True)
 
     # Setup logging
@@ -708,7 +700,11 @@ def gemini_batch_inference(
         if summary.get("cancelled"):
             raise typer.Exit(0)
 
-        # Display summary
+        # If job was just submitted (not waiting for completion), exit early
+        if summary.get("status") == "submitted":
+            raise typer.Exit(0)
+
+        # Display summary (only when job is completed)
         console.print()
         summary_table = Table(title="📊 Summary", show_header=False, box=None)
         summary_table.add_column("Key", style="cyan", width=30)
@@ -792,6 +788,9 @@ def gemini_batch_inference(
         else:
             console.print(Panel.fit("✓ Gemini batch inference completed successfully!", style="bold green"))
 
+    except typer.Exit:
+        # Re-raise typer.Exit to allow clean exit
+        raise
     except Exception as e:
         logger.error(f"Gemini batch inference failed: {e}")
         console.print(f"[red]❌ Error: {e}[/red]")
@@ -877,16 +876,8 @@ def generate_prompt_cmd() -> None:
         raise typer.Exit(1) from e
 
 
-@app.command("resume-job")
-def resume_batch_job(
-    job_file: Annotated[Path, typer.Argument(help="Path to .job.json file from previous batch run")],
-    poll_interval: Annotated[int, typer.Option(help="Seconds between status checks")] = 30,
-) -> None:
-    """Resume a batch job and get results.
-
-    Use this to retrieve results from a previously started batch job.
-    The job file is automatically created when running gemini-batch.
-    """
+def _gemini_batch_resume() -> None:
+    """Resume a batch job and get results."""
     import json
 
     from dotenv import load_dotenv
@@ -895,6 +886,11 @@ def resume_batch_job(
 
     console.print(Panel.fit("🔄 Resume Batch Job", style="bold magenta"))
     console.print()
+
+    # Interactive input
+    job_file_str = Prompt.ask("[cyan]📄 Path to .job.json file[/cyan]")
+    job_file = _resolve_path(job_file_str)
+    poll_interval = 30
 
     if not job_file.exists():
         console.print(f"[red]❌ Job file not found: {job_file}[/red]")
@@ -1039,9 +1035,10 @@ def resume_batch_job(
         console.print(f"[green]   Successful: {successful}[/green]")
         console.print(f"[red]   Failed: {failed}[/red]")
 
-        # Clean up job file
-        job_file.unlink()
-        console.print(f"[dim]Removed job file: {job_file}[/dim]")
+        # Mark job as completed (rename to .done.json instead of deleting)
+        done_file = job_file.with_suffix(".done.json")
+        job_file.rename(done_file)
+        console.print(f"[dim]Job file moved to: {done_file}[/dim]")
 
     except Exception as e:
         console.print(f"[red]❌ Error: {e}[/red]")
@@ -1051,390 +1048,728 @@ def resume_batch_job(
         raise typer.Exit(1) from e
 
 
-@app.command("benchmark-cache")
-def benchmark_cache(
-    input_csv: Annotated[Path | None, typer.Argument(help="Input CSV file with file_name column")] = None,
-    images_dir: Annotated[Path | None, typer.Argument(help="Directory containing images")] = None,
-    prompt: Annotated[Path | None, typer.Argument(help="Path to prompt file")] = None,
-    model: Annotated[str, typer.Option(help="Model name")] = "qwen3-vl-8b-instruct",
-    max_tokens: Annotated[int, typer.Option(help="Maximum tokens to generate")] = 1000,
-    temperature: Annotated[float, typer.Option(help="Sampling temperature")] = 0.0,
-    limit: Annotated[int | None, typer.Option(help="Number of images to benchmark")] = 1000,
-    max_workers: Annotated[int, typer.Option(help="Number of parallel workers for system mode")] = 12,
-    api_url: Annotated[str | None, typer.Option(help="VLM API URL")] = None,
-    internal: Annotated[bool, typer.Option("--internal", help="Use internal Kubernetes service URL")] = False,
-) -> None:
-    """Benchmark vLLM prefix caching performance.
+# =============================================================================
+# Gemini Batch Internal Functions: parse, status, info, list
+# =============================================================================
 
-    Compares inference speed between:
-    - system mode: prompt in system message (enables prefix caching)
-    - user mode: prompt in user message (no prefix caching)
-    """
-    console.print(Panel.fit("⚡ Prefix Caching Benchmark", style="bold magenta"))
+
+def _gemini_batch_parse() -> None:
+    """Parse Gemini Batch API output JSONL file."""
+    console.print(Panel.fit("📄 Parse Batch Output", style="bold magenta"))
     console.print()
 
-    # Interactive input if arguments not provided
-    if input_csv is None:
-        input_csv_str = Prompt.ask("[cyan]📄 Input CSV file path[/cyan]")
-        input_csv = _resolve_path(input_csv_str)
+    # Interactive input
+    input_str = Prompt.ask("[cyan]📥 Input JSONL file path[/cyan]")
+    input_jsonl = _resolve_path(input_str)
+    output_jsonl: Path | None = None
 
-    if images_dir is None:
-        images_dir_str = Prompt.ask("[cyan]📁 Images directory path[/cyan]")
-        images_dir = _resolve_path(images_dir_str)
+    if not input_jsonl.exists():
+        console.print(f"[red]❌ Input file not found: {input_jsonl}[/red]")
+        raise typer.Exit(1)
 
-    if prompt is None:
-        prompt_str = Prompt.ask("[cyan]📝 Prompt file path[/cyan]")
-        prompt = _resolve_path(prompt_str)
-
-    # Ask for limit if not provided
-    if limit is None:
-        limit_str = Prompt.ask("[cyan]🔢 Number of images to benchmark (default: 1000)[/cyan]", default="1000")
-        try:
-            limit = int(limit_str)
-        except ValueError:
-            limit = 1000
-
-    # Determine namespace
-    namespace = "vllm-test"
-    if api_url is None and not internal:
-        internal_str = Prompt.ask("[cyan]🔧 Running inside Kubernetes cluster? (y/N)[/cyan]", default="N")
-        internal = internal_str.strip().lower() in ["y", "yes"]
-
-    if api_url is None:
-        namespace = Prompt.ask(
-            "[cyan]🏷️  Select namespace (vllm / vllm-test)[/cyan]", choices=["vllm", "vllm-test"], default="vllm-test"
+    # Ask for output path interactively
+    if output_jsonl is None:
+        output_str = Prompt.ask(
+            "[cyan]📤 Output JSONL path (press Enter to print to stdout)[/cyan]",
+            default="",
         )
+        if output_str.strip():
+            output_jsonl = Path(output_str)
 
     console.print()
+    console.print(f"[cyan]Parsing: {input_jsonl}[/cyan]")
 
-    # Validate paths
-    if not input_csv.exists():
-        console.print(f"[red]❌ Error: Input CSV file not found: {input_csv}[/red]")
-        raise typer.Exit(1)
+    try:
+        results, summary = parse_batch_output(input_jsonl, output_jsonl, verbose=False)
 
-    if not images_dir.exists():
-        console.print(f"[red]❌ Error: Images directory not found: {images_dir}[/red]")
-        raise typer.Exit(1)
+        # Display summary
+        summary_table = Table(title="📊 Parse Summary", show_header=False, box=None)
+        summary_table.add_column("Key", style="cyan", width=25)
+        summary_table.add_column("Value", style="white")
 
-    if not prompt.exists():
-        console.print(f"[red]❌ Error: Prompt file not found: {prompt}[/red]")
-        raise typer.Exit(1)
-
-    # Determine API URL
-    if api_url is None:
-        api_url = _get_api_url(internal, model, namespace)
-
-    # Check server health
-    console.print(f"[cyan]🌐 API URL: {api_url}[/cyan]")
-    console.print("Checking server health...")
-    temp_client = VLMClient(api_url=api_url, model=model)
-    health_result = temp_client.check_health(timeout=10)
-
-    if not health_result["healthy"]:
-        console.print(f"[red]❌ Server not healthy: {health_result.get('error', 'Unknown error')}[/red]")
-        raise typer.Exit(1)
-
-    console.print("[green]✓ Server is healthy[/green]")
-    console.print()
-
-    # Display benchmark configuration
-    config_table = Table(title="⚙️  Benchmark Configuration", show_header=False, box=None)
-    config_table.add_column("Key", style="cyan", width=20)
-    config_table.add_column("Value", style="white")
-
-    config_table.add_row("📄 Input CSV", str(input_csv))
-    config_table.add_row("📁 Images directory", str(images_dir))
-    config_table.add_row("📝 Prompt file", str(prompt))
-    config_table.add_row("🌐 API URL", api_url)
-    config_table.add_row("🤖 Model", model)
-    config_table.add_row("📊 Images to test", str(limit))
-    config_table.add_row("⚡ Workers", str(max_workers))
-
-    console.print(config_table)
-    console.print()
-
-    # Create output directory for benchmark results
-    from datetime import datetime
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    benchmark_dir = Path("results") / f"benchmark_{timestamp}"
-    benchmark_dir.mkdir(parents=True, exist_ok=True)
-    console.print(f"[cyan]📁 Benchmark results will be saved to: {benchmark_dir}[/cyan]")
-    console.print()
-
-    results = {}
-    first_run = True
-
-    for mode in ["system", "user"]:
-        # Wait between runs to allow server to stabilize (GPU memory cleanup)
-        if not first_run:
-            console.print("[dim]Waiting 10s for server to stabilize...[/dim]")
-            time.sleep(10)
-        first_run = False
-
-        mode_label = "System prompt (prefix caching)" if mode == "system" else "User prompt (no caching)"
-        console.print(f"[bold cyan]Running benchmark: {mode_label}[/bold cyan]")
-        console.print()
-
-        output_csv = benchmark_dir / f"benchmark_{mode}.csv"
-
-        try:
-            summary = run_batch_inference(
-                input_csv=input_csv,
-                images_dir=images_dir,
-                prompt_path=prompt,
-                output_csv=output_csv,
-                api_url=api_url,
-                model=model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                limit=limit,
-                max_workers=max_workers if mode == "system" else 4,
-                prompt_mode=mode,
+        summary_table.add_row("📄 Total records", str(summary.total_count))
+        summary_table.add_row("✅ Successful", f"[green]{summary.success_count}[/green]")
+        summary_table.add_row("❌ Failed", f"[red]{summary.failed_count}[/red]")
+        summary_table.add_row(
+            "📦 Input size",
+            f"{summary.input_size_bytes / 1024 / 1024:.1f} MB",
+        )
+        if summary.output_size_bytes is not None:
+            summary_table.add_row(
+                "📦 Output size",
+                f"{summary.output_size_bytes / 1024 / 1024:.1f} MB",
             )
-
-            actual_workers = max_workers if mode == "system" else 4
-            results[mode] = {
-                "total": summary["total"],
-                "successful": summary["successful"],
-                "failed": summary["failed"],
-                "total_time": summary["total_time"],
-                "avg_latency": summary["avg_latency"],
-                "avg_time_per_image": summary["avg_time_per_image"],
-                "throughput": summary["total"] / summary["total_time"] if summary["total_time"] > 0 else 0,
-                "output_csv": output_csv,
-                "workers": actual_workers,
-            }
-
-            if summary["failed"] > 0:
-                console.print(
-                    f"[yellow]⚠ {mode_label}: {summary['total_time']:.2f}s "
-                    f"({summary['failed']}/{summary['total']} failed)[/yellow]"
+            if summary.reduction_percent:
+                summary_table.add_row(
+                    "📉 Size reduction",
+                    f"[bold green]{summary.reduction_percent:.1f}%[/bold green]",
                 )
-                # Show error samples
-                import pandas as pd
 
-                df = pd.read_csv(output_csv)
-                errors = df[~df["success"]]["error"].dropna().head(3).tolist()
-                if errors:
-                    console.print("[yellow]  Error samples:[/yellow]")
-                    for err in errors:
-                        err_str = str(err)[:100]
-                        console.print(f"    - {err_str}")
-            else:
-                console.print(f"[green]✓ {mode_label}: {summary['total_time']:.2f}s[/green]")
-            console.print()
-
-        except Exception as e:
-            console.print(f"[red]❌ Error in {mode} mode: {e}[/red]")
-            results[mode] = {}  # Empty dict instead of None
-
-    # Display comparison results
-    console.print()
-    console.print(Panel.fit("📊 Benchmark Results", style="bold green"))
-    console.print()
-
-    if results.get("system") and results.get("user"):
-        system_result = results["system"]
-        user_result = results["user"]
-
-        result_table = Table(title="Prefix Caching Comparison", show_header=True)
-        result_table.add_column("Metric", style="cyan", width=25)
-        result_table.add_column("System (cached)", style="green", justify="right")
-        result_table.add_column("User (no cache)", style="yellow", justify="right")
-        result_table.add_column("Difference", style="magenta", justify="right")
-
-        # Total time comparison
-        time_diff = user_result["total_time"] - system_result["total_time"]
-        time_pct = (time_diff / user_result["total_time"]) * 100 if user_result["total_time"] > 0 else 0
-        result_table.add_row(
-            "Total time",
-            f"{system_result['total_time']:.2f}s",
-            f"{user_result['total_time']:.2f}s",
-            f"{time_diff:+.2f}s ({time_pct:+.1f}%)",
-        )
-
-        # Throughput comparison
-        throughput_diff = system_result["throughput"] - user_result["throughput"]
-        throughput_pct = (throughput_diff / user_result["throughput"]) * 100 if user_result["throughput"] > 0 else 0
-        result_table.add_row(
-            "Throughput",
-            f"{system_result['throughput']:.2f} img/s",
-            f"{user_result['throughput']:.2f} img/s",
-            f"{throughput_diff:+.2f} ({throughput_pct:+.1f}%)",
-        )
-
-        # Avg latency comparison
-        latency_diff = user_result["avg_latency"] - system_result["avg_latency"]
-        latency_pct = (latency_diff / user_result["avg_latency"]) * 100 if user_result["avg_latency"] > 0 else 0
-        result_table.add_row(
-            "Avg API latency",
-            f"{system_result['avg_latency']:.3f}s",
-            f"{user_result['avg_latency']:.3f}s",
-            f"{latency_diff:+.3f}s ({latency_pct:+.1f}%)",
-        )
-
-        # Avg time per image
-        time_per_img_diff = user_result["avg_time_per_image"] - system_result["avg_time_per_image"]
-        time_per_img_pct = (
-            (time_per_img_diff / user_result["avg_time_per_image"]) * 100
-            if user_result["avg_time_per_image"] > 0
-            else 0
-        )
-        result_table.add_row(
-            "Avg time per image",
-            f"{system_result['avg_time_per_image']:.3f}s",
-            f"{user_result['avg_time_per_image']:.3f}s",
-            f"{time_per_img_diff:+.3f}s ({time_per_img_pct:+.1f}%)",
-        )
-
-        # Success rate
-        system_success_rate = (
-            (system_result["successful"] / system_result["total"]) * 100 if system_result["total"] > 0 else 0
-        )
-        user_success_rate = (user_result["successful"] / user_result["total"]) * 100 if user_result["total"] > 0 else 0
-        result_table.add_row(
-            "Success rate",
-            f"{system_success_rate:.1f}%",
-            f"{user_success_rate:.1f}%",
-            f"{system_success_rate - user_success_rate:+.1f}%",
-        )
-
-        # Workers
-        result_table.add_row(
-            "Workers",
-            f"{system_result['workers']}",
-            f"{user_result['workers']}",
-            "-",
-        )
-
-        console.print(result_table)
+        console.print(summary_table)
         console.print()
 
-        # Summary
-        speedup = user_result["total_time"] / system_result["total_time"] if system_result["total_time"] > 0 else 1
-
-        if speedup > 1.05:
-            console.print(f"[bold green]✓ Prefix caching provides {speedup:.2f}x speedup![/bold green]")
-        elif speedup < 0.95:
-            console.print(
-                f"[bold yellow]⚠ User mode was faster ({1 / speedup:.2f}x). "
-                "Prefix caching may not be effective for this workload.[/bold yellow]"
-            )
+        if output_jsonl:
+            console.print(f"[green]✅ Parsed output saved to: {output_jsonl}[/green]")
         else:
-            console.print("[bold cyan]≈ Performance is similar between both modes.[/bold cyan]")
-
-    else:
-        console.print("[red]Could not complete benchmark comparison.[/red]")
-        if results.get("system"):
-            console.print(f"  System mode: {results['system']['total_time']:.2f}s")
-        if results.get("user"):
-            console.print(f"  User mode: {results['user']['total_time']:.2f}s")
-
-    # Estimate time for 140,000 images
-    console.print()
-    console.print(Panel.fit("📈 140,000 Images Processing Time Estimate", style="bold blue"))
-    console.print()
-
-    target_images = 140000
-
-    estimate_table = Table(title="Estimated Processing Time for 140K Images", show_header=True)
-    estimate_table.add_column("Mode", style="cyan", width=25)
-    estimate_table.add_column("Throughput", style="white", justify="right")
-    estimate_table.add_column("Estimated Time", style="yellow", justify="right")
-    estimate_table.add_column("Estimated Hours", style="green", justify="right")
-
-    if results.get("system") and results["system"].get("throughput", 0) > 0:
-        system_throughput = results["system"]["throughput"]
-        system_est_seconds = target_images / system_throughput
-        system_est_hours = system_est_seconds / 3600
-        estimate_table.add_row(
-            "System (prefix caching)",
-            f"{system_throughput:.2f} img/s",
-            f"{system_est_seconds:.0f}s",
-            f"[bold green]{system_est_hours:.1f}h[/bold green]",
-        )
-    else:
-        estimate_table.add_row("System (prefix caching)", "N/A", "N/A", "N/A")
-
-    if results.get("user") and results["user"].get("throughput", 0) > 0:
-        user_throughput = results["user"]["throughput"]
-        user_est_seconds = target_images / user_throughput
-        user_est_hours = user_est_seconds / 3600
-        estimate_table.add_row(
-            "User (no caching)",
-            f"{user_throughput:.2f} img/s",
-            f"{user_est_seconds:.0f}s",
-            f"[bold yellow]{user_est_hours:.1f}h[/bold yellow]",
-        )
-    else:
-        estimate_table.add_row("User (no caching)", "N/A", "N/A", "N/A")
-
-    console.print(estimate_table)
-
-    # Show time savings
-    if (
-        results.get("system")
-        and results.get("user")
-        and results["system"].get("throughput", 0) > 0
-        and results["user"].get("throughput", 0) > 0
-    ):
-        system_est_hours = target_images / results["system"]["throughput"] / 3600
-        user_est_hours = target_images / results["user"]["throughput"] / 3600
-        time_saved_hours = user_est_hours - system_est_hours
-
-        if time_saved_hours > 0:
-            console.print()
-            console.print(
-                f"[bold green]💡 Prefix caching saves approximately {time_saved_hours:.1f} hours "
-                f"for 140K images![/bold green]"
-            )
-
-    # Run comparison analysis if both results exist
-    if results.get("system") and results.get("user"):
-        system_csv = results["system"].get("output_csv")
-        user_csv = results["user"].get("output_csv")
-
-        if system_csv and user_csv and Path(system_csv).exists() and Path(user_csv).exists():
-            console.print()
-            console.print(Panel.fit("🔍 Response Comparison Analysis", style="bold cyan"))
-            console.print()
-
-            from src.inference.compare import compare_benchmark_results
-
-            comparison = compare_benchmark_results(Path(system_csv), Path(user_csv))
-
-            # Save comparison report
-            comparison_file = benchmark_dir / "comparison_report.json"
+            # Print results to stdout
+            console.print("[dim]Results (JSON):[/dim]")
             import json
 
-            with open(comparison_file, "w", encoding="utf-8") as f:
-                json.dump(comparison, f, indent=2, ensure_ascii=False)
+            for r in results:
+                print(
+                    json.dumps(
+                        {
+                            "key": r.key,
+                            "success": r.success,
+                            "finish_reason": r.finish_reason,
+                            "result": r.result,
+                            "error": r.error,
+                            "input_tokens": r.input_tokens,
+                            "output_tokens": r.output_tokens,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
 
-            # Display comparison metrics
-            comp_table = Table(title="Response Comparison", show_header=False, box=None)
-            comp_table.add_column("Metric", style="cyan", width=30)
-            comp_table.add_column("Value", style="white")
+    except Exception as e:
+        console.print(f"[red]❌ Error parsing batch output: {e}[/red]")
+        import traceback
 
-            comp_table.add_row("📊 Total compared", str(comparison["total_compared"]))
-            comp_table.add_row(
-                "✅ Identical responses",
-                f"[green]{comparison['identical']} ({comparison['identical_pct']:.1f}%)[/green]",
-            )
-            comp_table.add_row(
-                "⚠️  Different responses",
-                f"[yellow]{comparison['different']} ({comparison['different_pct']:.1f}%)[/yellow]",
-            )
-            comp_table.add_row("❌ Parse errors (system)", str(comparison["system_parse_errors"]))
-            comp_table.add_row("❌ Parse errors (user)", str(comparison["user_parse_errors"]))
+        traceback.print_exc()
+        raise typer.Exit(1) from e
 
-            console.print(comp_table)
+
+def _gemini_batch_status() -> None:
+    """Check the status of a Gemini batch job."""
+    import json
+    import os
+
+    from dotenv import load_dotenv
+    from google import genai
+
+    load_dotenv()
+
+    console.print(Panel.fit("📊 Batch Job Status", style="bold magenta"))
+    console.print()
+
+    # Interactive input
+    input_type = Prompt.ask(
+        "[cyan]Enter job name or .job.json file path?[/cyan]",
+        choices=["name", "file"],
+        default="file",
+    )
+
+    job_name: str | None = None
+    job_file: Path | None = None
+
+    if input_type == "file":
+        job_file_str = Prompt.ask("[cyan]📄 Path to .job.json file[/cyan]")
+        job_file = _resolve_path(job_file_str)
+        if not job_file.exists():
+            console.print(f"[red]❌ Job file not found: {job_file}[/red]")
+            raise typer.Exit(1)
+        with open(job_file, encoding="utf-8") as f:
+            job_info = json.load(f)
+        job_name = job_info.get("job_name")
+        console.print(f"[cyan]Loaded job from: {job_file}[/cyan]")
+    else:
+        job_name = Prompt.ask("[cyan]🔑 Batch job name[/cyan]")
+
+    if not job_name:
+        console.print("[red]❌ Job name is required[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[cyan]Checking status for: {job_name}[/cyan]")
+    console.print()
+
+    # Initialize client
+    use_vertex = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "FALSE").upper() == "TRUE"
+
+    if use_vertex:
+        project = os.getenv("GOOGLE_CLOUD_PROJECT")
+        location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+
+        if not project:
+            creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+            if creds_path and Path(creds_path).exists():
+                try:
+                    with open(creds_path, encoding="utf-8") as f:
+                        creds_data = json.load(f)
+                        project = creds_data.get("project_id")
+                except (OSError, json.JSONDecodeError):
+                    pass
+
+        if not project:
+            console.print("[red]❌ GOOGLE_CLOUD_PROJECT not set[/red]")
+            raise typer.Exit(1)
+
+        client = genai.Client(vertexai=True, project=project, location=location)
+    else:
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            console.print("[red]❌ GOOGLE_API_KEY not set[/red]")
+            raise typer.Exit(1)
+        client = genai.Client(api_key=api_key)
+
+    try:
+        job = client.batches.get(name=job_name)
+
+        state = str(job.state) if hasattr(job, "state") else "UNKNOWN"
+
+        # State color mapping
+        state_colors = {
+            "JOB_STATE_SUCCEEDED": "green",
+            "JOB_STATE_FAILED": "red",
+            "JOB_STATE_CANCELLED": "yellow",
+            "JOB_STATE_RUNNING": "cyan",
+            "JOB_STATE_PENDING": "yellow",
+        }
+        state_color = state_colors.get(state, "white")
+
+        from datetime import datetime, timedelta, timezone
+
+        kst_tz = timezone(timedelta(hours=9))
+
+        def format_time_with_kst(dt: datetime | None) -> str:
+            """Format datetime with both UTC and KST."""
+            if dt is None:
+                return "N/A"
+            kst_time = dt.astimezone(kst_tz)
+            return f"{dt.strftime('%Y-%m-%d %H:%M:%S')} UTC | {kst_time.strftime('%m/%d %H:%M')} KST"
+
+        status_table = Table(title="Job Status", show_header=False, box=None)
+        status_table.add_column("Key", style="cyan", width=20)
+        status_table.add_column("Value", style="white")
+
+        status_table.add_row("🔑 Job Name", job_name)
+        status_table.add_row("📊 State", f"[{state_color}]{state}[/{state_color}]")
+
+        if hasattr(job, "model") and job.model:
+            status_table.add_row("🤖 Model", str(job.model))
+
+        if hasattr(job, "create_time") and job.create_time:
+            status_table.add_row("📅 Created", format_time_with_kst(job.create_time))
+
+        if hasattr(job, "start_time") and job.start_time:
+            status_table.add_row("▶️  Started", format_time_with_kst(job.start_time))
+
+        if hasattr(job, "end_time") and job.end_time:
+            status_table.add_row("⏹️  Ended", format_time_with_kst(job.end_time))
+
+        if hasattr(job, "update_time") and job.update_time:
+            status_table.add_row("🔄 Updated", format_time_with_kst(job.update_time))
+
+        console.print(status_table)
+        console.print()
+
+        # Show completion status message
+        if state == "JOB_STATE_SUCCEEDED":
+            console.print("[bold green]✅ Job completed successfully![/bold green]")
+            if job_file:
+                console.print(f"[cyan]Run 'carwash gemini-batch resume {job_file}' to get results[/cyan]")
+        elif state == "JOB_STATE_FAILED":
+            console.print("[bold red]❌ Job failed[/bold red]")
+        elif state == "JOB_STATE_CANCELLED":
+            console.print("[bold yellow]⚠️ Job was cancelled[/bold yellow]")
+        elif state == "JOB_STATE_RUNNING":
+            console.print("[bold cyan]⏳ Job is still running...[/bold cyan]")
+        elif state == "JOB_STATE_PENDING":
+            console.print("[bold yellow]⏳ Job is queued and waiting to start...[/bold yellow]")
+
+    except Exception as e:
+        console.print(f"[red]❌ Error checking job status: {e}[/red]")
+        import traceback
+
+        traceback.print_exc()
+        raise typer.Exit(1) from e
+
+
+def _gemini_batch_info() -> None:
+    """Get detailed information about a Gemini batch job."""
+    import json
+    import os
+
+    from dotenv import load_dotenv
+    from google import genai
+
+    load_dotenv()
+
+    console.print(Panel.fit("ℹ️  Batch Job Info", style="bold magenta"))
+    console.print()
+
+    # Interactive input
+    input_type = Prompt.ask(
+        "[cyan]Enter job name or .job.json file path?[/cyan]",
+        choices=["name", "file"],
+        default="file",
+    )
+
+    job_name: str | None = None
+    local_job_info = None
+
+    if input_type == "file":
+        job_file_str = Prompt.ask("[cyan]📄 Path to .job.json file[/cyan]")
+        job_file = _resolve_path(job_file_str)
+        if not job_file.exists():
+            console.print(f"[red]❌ Job file not found: {job_file}[/red]")
+            raise typer.Exit(1)
+        with open(job_file, encoding="utf-8") as f:
+            local_job_info = json.load(f)
+        job_name = local_job_info.get("job_name")
+        console.print(f"[cyan]Loaded job info from: {job_file}[/cyan]")
+    else:
+        job_name = Prompt.ask("[cyan]🔑 Batch job name[/cyan]")
+
+    if not job_name:
+        console.print("[red]❌ Job name is required[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[cyan]Fetching details for: {job_name}[/cyan]")
+    console.print()
+
+    # Initialize client
+    use_vertex = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "FALSE").upper() == "TRUE"
+
+    if use_vertex:
+        project = os.getenv("GOOGLE_CLOUD_PROJECT")
+        location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+
+        if not project:
+            creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+            if creds_path and Path(creds_path).exists():
+                try:
+                    with open(creds_path, encoding="utf-8") as f:
+                        creds_data = json.load(f)
+                        project = creds_data.get("project_id")
+                except (OSError, json.JSONDecodeError):
+                    pass
+
+        if not project:
+            console.print("[red]❌ GOOGLE_CLOUD_PROJECT not set[/red]")
+            raise typer.Exit(1)
+
+        client = genai.Client(vertexai=True, project=project, location=location)
+    else:
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            console.print("[red]❌ GOOGLE_API_KEY not set[/red]")
+            raise typer.Exit(1)
+        client = genai.Client(api_key=api_key)
+
+    try:
+        job = client.batches.get(name=job_name)
+
+        # Basic info table
+        basic_table = Table(title="📋 Basic Information", show_header=False, box=None)
+        basic_table.add_column("Key", style="cyan", width=25)
+        basic_table.add_column("Value", style="white")
+
+        basic_table.add_row("🔑 Job Name", job_name)
+
+        state = str(job.state) if hasattr(job, "state") else "UNKNOWN"
+        state_colors = {
+            "JOB_STATE_SUCCEEDED": "green",
+            "JOB_STATE_FAILED": "red",
+            "JOB_STATE_CANCELLED": "yellow",
+            "JOB_STATE_RUNNING": "cyan",
+            "JOB_STATE_PENDING": "yellow",
+        }
+        state_color = state_colors.get(state, "white")
+        basic_table.add_row("📊 State", f"[{state_color}]{state}[/{state_color}]")
+
+        if hasattr(job, "model") and job.model:
+            basic_table.add_row("🤖 Model", str(job.model))
+
+        if hasattr(job, "display_name") and job.display_name:
+            basic_table.add_row("📛 Display Name", job.display_name)
+
+        console.print(basic_table)
+        console.print()
+
+        # Timing table
+        timing_table = Table(title="⏱️  Timing", show_header=False, box=None)
+        timing_table.add_column("Key", style="cyan", width=25)
+        timing_table.add_column("Value", style="white")
+
+        if hasattr(job, "create_time") and job.create_time:
+            timing_table.add_row("📅 Created", str(job.create_time))
+
+        if hasattr(job, "start_time") and job.start_time:
+            timing_table.add_row("▶️  Started", str(job.start_time))
+
+        if hasattr(job, "end_time") and job.end_time:
+            timing_table.add_row("⏹️  Ended", str(job.end_time))
+
+        if hasattr(job, "update_time") and job.update_time:
+            timing_table.add_row("🔄 Updated", str(job.update_time))
+
+        # Calculate durations
+        if hasattr(job, "start_time") and hasattr(job, "end_time") and job.start_time and job.end_time:
+            duration = (job.end_time - job.start_time).total_seconds()
+            timing_table.add_row("⏱️  Processing Duration", f"[bold yellow]{duration:.1f}s[/bold yellow]")
+
+        if hasattr(job, "create_time") and hasattr(job, "start_time") and job.create_time and job.start_time:
+            queue_wait = (job.start_time - job.create_time).total_seconds()
+            timing_table.add_row("⏳ Queue Wait", f"{queue_wait:.1f}s")
+
+        console.print(timing_table)
+        console.print()
+
+        # Source/Destination table
+        if hasattr(job, "src") or hasattr(job, "dest"):
+            io_table = Table(title="📁 Input/Output", show_header=False, box=None)
+            io_table.add_column("Key", style="cyan", width=25)
+            io_table.add_column("Value", style="white")
+
+            if hasattr(job, "src") and job.src:
+                src = job.src
+                if hasattr(src, "gcs_uri") and src.gcs_uri:
+                    # gcs_uri can be a string or list
+                    gcs_uri_val = src.gcs_uri
+                    if isinstance(gcs_uri_val, list):
+                        gcs_uri_str = ", ".join(str(u) for u in gcs_uri_val)
+                    else:
+                        gcs_uri_str = str(gcs_uri_val)
+                    io_table.add_row("📥 Input GCS URI", gcs_uri_str)
+                elif hasattr(src, "inlined_requests") and src.inlined_requests:
+                    io_table.add_row("📥 Input Type", f"Inline ({len(src.inlined_requests)} requests)")
+
+            if hasattr(job, "dest") and job.dest:
+                dest = job.dest
+                if hasattr(dest, "gcs_uri") and dest.gcs_uri:
+                    # gcs_uri can be a string or list
+                    dest_gcs_uri = dest.gcs_uri
+                    if isinstance(dest_gcs_uri, list):
+                        gcs_uri_str = ", ".join(str(u) for u in dest_gcs_uri)
+                    else:
+                        gcs_uri_str = str(dest_gcs_uri)
+                    io_table.add_row("📤 Output GCS URI", gcs_uri_str)
+                elif hasattr(dest, "inlined_responses") and dest.inlined_responses:
+                    io_table.add_row("📤 Output Type", f"Inline ({len(dest.inlined_responses)} responses)")
+
+            console.print(io_table)
             console.print()
-            console.print(f"[dim]Detailed comparison saved to: {comparison_file}[/dim]")
+
+        # Local job info if available
+        if local_job_info:
+            local_table = Table(title="📝 Local Job Info", show_header=False, box=None)
+            local_table.add_column("Key", style="cyan", width=25)
+            local_table.add_column("Value", style="white")
+
+            if "num_requests" in local_job_info:
+                local_table.add_row("📊 Num Requests", str(local_job_info["num_requests"]))
+
+            if "prompt_version" in local_job_info:
+                local_table.add_row("📝 Prompt Version", local_job_info["prompt_version"])
+
+            if "output_csv" in local_job_info:
+                local_table.add_row("💾 Output CSV", local_job_info["output_csv"])
+
+            if "timing" in local_job_info:
+                timing = local_job_info["timing"]
+                if timing.get("cli_started_at"):
+                    local_table.add_row("🚀 CLI Started", timing["cli_started_at"])
+                if timing.get("job_submitted_at"):
+                    local_table.add_row("📤 Submitted", timing["job_submitted_at"])
+
+            console.print(local_table)
+            console.print()
+
+        # Raw attributes for debugging
+        console.print("[dim]Available job attributes:[/dim]")
+        attrs = [attr for attr in dir(job) if not attr.startswith("_")]
+        console.print(f"[dim]{', '.join(attrs[:20])}{'...' if len(attrs) > 20 else ''}[/dim]")
+
+    except Exception as e:
+        console.print(f"[red]❌ Error fetching job info: {e}[/red]")
+        import traceback
+
+        traceback.print_exc()
+        raise typer.Exit(1) from e
+
+
+def _gemini_batch_list() -> None:
+    """List recent Gemini batch jobs."""
+    import glob
+    import json
+    import os
+    from datetime import timedelta, timezone
+
+    from dotenv import load_dotenv
+    from google import genai
+
+    load_dotenv()
+
+    console.print(Panel.fit("📋 List Batch Jobs", style="bold magenta"))
+    console.print()
+
+    # Check for local job files (.job.json = pending/running, .done.json = completed)
+    pending_files = glob.glob("results/*.job.json")
+    done_files = glob.glob("results/*.job.done.json")
+    all_job_files = pending_files + done_files
+
+    if all_job_files:
+        console.print("[bold cyan]📁 로컬 작업 파일:[/bold cyan]")
+        kst_tz = timezone(timedelta(hours=9))  # noqa: F841
+
+        # Sort by modification time (newest first)
+        all_job_files_sorted = sorted(all_job_files, key=lambda x: Path(x).stat().st_mtime, reverse=True)[:10]
+
+        for job_file in all_job_files_sorted:
+            is_done = job_file.endswith(".done.json")
+            try:
+                with open(job_file, encoding="utf-8") as f:
+                    job_data = json.load(f)
+                job_name = job_data.get("job_name", "unknown")
+                job_id = job_name.split("/")[-1] if "/" in job_name else job_name
+                model = job_data.get("model", "N/A")
+                num_requests = job_data.get("num_requests", 0)
+
+                if is_done:
+                    # Already completed - don't query API
+                    console.print(f"  ✅ [DONE] {Path(job_file).name}")
+                    console.print(f"     모델: {model} | 요청: {num_requests}개 | ID: {job_id}")
+                else:
+                    # Try to get status from API
+                    try:
+                        # Extract project and location from job name
+                        # Format: projects/{project}/locations/{loc}/batchPredictionJobs/{id}
+                        parts = job_name.split("/")
+                        if len(parts) >= 4:
+                            project_id = parts[1]
+                            location = parts[3]  # Extract location from job name
+                            client = genai.Client(vertexai=True, project=project_id, location=location)
+                            job = client.batches.get(name=job_name)
+                            state = str(job.state).replace("JobState.", "").replace("JOB_STATE_", "")
+
+                            state_icons = {
+                                "SUCCEEDED": "✅",
+                                "FAILED": "❌",
+                                "CANCELLED": "⚠️",
+                                "RUNNING": "🔄",
+                                "PENDING": "⏳",
+                            }
+                            icon = state_icons.get(state, "❓")
+                            console.print(f"  {icon} [{state}] {Path(job_file).name}")
+                            console.print(f"     모델: {model} | 요청: {num_requests}개 | ID: {job_id}")
+                        else:
+                            console.print(f"  ❓ {Path(job_file).name} (상태 확인 불가)")
+                    except Exception as e:
+                        console.print(f"  ❓ {Path(job_file).name} (API 조회 실패: {e})")
+            except (OSError, json.JSONDecodeError):
+                console.print(f"  ❓ {Path(job_file).name} (파일 읽기 실패)")
+
+        console.print()
+
+    # Interactive input for limit
+    limit_str = Prompt.ask("[cyan]🔢 API에서 조회할 작업 수[/cyan]", default="10")
+    try:
+        limit = int(limit_str)
+    except ValueError:
+        limit = 10
+
+    # Initialize client
+    use_vertex = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "FALSE").upper() == "TRUE"
+
+    if use_vertex:
+        project = os.getenv("GOOGLE_CLOUD_PROJECT")
+
+        if not project:
+            creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+            if creds_path and Path(creds_path).exists():
+                try:
+                    with open(creds_path, encoding="utf-8") as f:
+                        creds_data = json.load(f)
+                        project = creds_data.get("project_id")
+                except (OSError, json.JSONDecodeError):
+                    pass
+
+        if not project:
+            console.print("[red]❌ GOOGLE_CLOUD_PROJECT not set[/red]")
+            raise typer.Exit(1)
+
+        console.print(f"[cyan]Using Vertex AI (project: {project})[/cyan]")
+
+        # Query both locations (global for gemini-3, us-central1 for older models)
+        jobs: list = []
+        for loc in ["global", "us-central1"]:
+            try:
+                client = genai.Client(vertexai=True, project=project, location=loc)
+                loc_jobs = list(client.batches.list())
+                jobs.extend(loc_jobs)
+                console.print(f"[dim]  {loc}: {len(loc_jobs)}개 작업[/dim]")
+            except Exception as e:
+                console.print(f"[dim]  {loc}: 조회 실패 ({e})[/dim]")
+    else:
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            console.print("[red]❌ GOOGLE_API_KEY not set[/red]")
+            raise typer.Exit(1)
+        client = genai.Client(api_key=api_key)
+        console.print("[cyan]Using Gemini Developer API[/cyan]")
+        jobs = list(client.batches.list())
 
     console.print()
-    console.print(f"[bold green]✓ Benchmark results saved to: {benchmark_dir}[/bold green]")
+
+    try:
+        # List batch jobs (already fetched above for Vertex AI)
+
+        if not jobs:
+            console.print("[yellow]No batch jobs found[/yellow]")
+            return
+
+        # Sort by create_time descending (most recent first)
+        jobs_sorted = sorted(
+            jobs,
+            key=lambda j: j.create_time if hasattr(j, "create_time") and j.create_time else "",
+            reverse=True,
+        )[:limit]
+
+        # Create jobs table
+        from datetime import timedelta, timezone
+
+        from rich.box import ROUNDED
+
+        kst_tz = timezone(timedelta(hours=9))
+
+        jobs_table = Table(
+            title=f"📋 최근 배치 작업 ({len(jobs_sorted)}/{len(jobs)}개)",
+            box=ROUNDED,
+            border_style="cyan",
+            show_lines=True,
+        )
+        jobs_table.add_column("#", style="dim", width=3, justify="right")
+        jobs_table.add_column("상태", width=12, justify="center")
+        jobs_table.add_column("모델", style="cyan", width=18)
+        jobs_table.add_column("생성(KST)", width=12)
+        jobs_table.add_column("Job ID", style="dim")
+
+        state_display = {
+            "SUCCEEDED": ("✅ 성공", "green"),
+            "FAILED": ("❌ 실패", "red"),
+            "CANCELLED": ("⚠️ 취소", "yellow"),
+            "RUNNING": ("🔄 실행중", "cyan"),
+            "PENDING": ("⏳ 대기중", "yellow"),
+        }
+
+        for idx, job in enumerate(jobs_sorted, 1):
+            job_name = job.name if hasattr(job, "name") else "unknown"
+            # Clean up state string (remove JobState. and JOB_STATE_ prefixes)
+            state = str(job.state) if hasattr(job, "state") else "UNKNOWN"
+            state = state.replace("JobState.", "").replace("JOB_STATE_", "")
+            state_text, state_color = state_display.get(state, (state, "white"))
+            model = str(job.model) if hasattr(job, "model") and job.model else "N/A"
+
+            # Shorten model name
+            if "/" in model:
+                model = model.split("/")[-1]
+
+            # Convert to KST
+            created_kst = ""
+            if hasattr(job, "create_time") and job.create_time:
+                kst_time = job.create_time.astimezone(kst_tz)
+                created_kst = kst_time.strftime("%m/%d %H:%M")
+
+            # Extract job ID from full name (show full ID)
+            job_id = job_name.split("/")[-1] if "/" in job_name else job_name
+
+            jobs_table.add_row(
+                str(idx),
+                f"[{state_color}]{state_text}[/{state_color}]",
+                model,
+                created_kst,
+                job_id,
+            )
+
+        console.print(jobs_table)
+        console.print()
+
+        # Show running jobs separately if any
+        running_jobs = [
+            j for j in jobs if str(j.state).replace("JobState.", "").replace("JOB_STATE_", "") in ("RUNNING", "PENDING")
+        ]
+        if running_jobs:
+            console.print(f"[bold cyan]🔄 현재 실행 중인 작업: {len(running_jobs)}개[/bold cyan]")
+            for rj in running_jobs:
+                rj_state = str(rj.state).replace("JobState.", "").replace("JOB_STATE_", "")
+                rj_id = rj.name.split("/")[-1] if "/" in rj.name else rj.name
+                console.print(f"  • {rj_id} ({rj_state})")
+            console.print()
+
+        console.print("[dim]상세 정보: 메뉴에서 3번(status) 또는 4번(info) 선택[/dim]")
+
+    except Exception as e:
+        console.print(f"[red]❌ Error listing jobs: {e}[/red]")
+        import traceback
+
+        traceback.print_exc()
+        raise typer.Exit(1) from e
+
+
+# =============================================================================
+# Gemini Batch Main Menu Command
+# =============================================================================
+
+
+@app.command("gemini-batch")
+def gemini_batch_menu() -> None:
+    """Gemini Batch API (50% cost savings) - Interactive menu."""
+    from rich.box import ROUNDED
+
+    # Header
+    header_content = "[bold white]🚀 Gemini Batch API[/bold white]\n[dim]50% 비용 절감 | 최대 24시간 소요[/dim]"
+    console.print(Panel(header_content, style="magenta", box=ROUNDED))
     console.print()
+
+    # Menu options with icons
+    menu_table = Table(
+        show_header=True,
+        header_style="bold cyan",
+        box=ROUNDED,
+        border_style="cyan",
+        padding=(0, 1),
+    )
+    menu_table.add_column("번호", justify="center", width=6)
+    menu_table.add_column("기능", width=16)
+    menu_table.add_column("설명", style="dim")
+
+    menu_table.add_row("[bold green]1[/]", "🚀 infer", "이미지 배치 추론 시작")
+    menu_table.add_row("[bold green]2[/]", "📥 resume", "배치 작업 결과 가져오기")
+    menu_table.add_row("[bold green]3[/]", "📊 status", "작업 상태 확인")
+    menu_table.add_row("[bold green]4[/]", "ℹ️  info", "상세 정보 조회")
+    menu_table.add_row("[bold green]5[/]", "📋 list", "최근 작업 목록")
+    menu_table.add_row("[bold green]6[/]", "🔧 parse", "결과 JSONL 파싱")
+    menu_table.add_row("[bold red]0[/]", "🚪 exit", "종료")
+
+    console.print(menu_table)
+    console.print()
+
+    # Get user choice
+    choice = Prompt.ask(
+        "[bold cyan]선택[/bold cyan]",
+        choices=["0", "1", "2", "3", "4", "5", "6"],
+        default="1",
+    )
+
+    console.print()
+
+    # Execute selected option
+    if choice == "0":
+        console.print("[yellow]Exiting...[/yellow]")
+        return
+    elif choice == "1":
+        _gemini_batch_infer()
+    elif choice == "2":
+        _gemini_batch_resume()
+    elif choice == "3":
+        _gemini_batch_status()
+    elif choice == "4":
+        _gemini_batch_info()
+    elif choice == "5":
+        _gemini_batch_list()
+    elif choice == "6":
+        _gemini_batch_parse()
 
 
 def main() -> None:
