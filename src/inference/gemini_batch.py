@@ -1122,70 +1122,82 @@ def parse_batch_results(
 
                     # Download to a bytes buffer and read line by line
                     blob_bytes = blob.download_as_bytes()
-                    line_count = 0
 
-                    for line in io.BytesIO(blob_bytes):
-                        line_str = line.decode("utf-8").strip()
-                        if not line_str:
-                            continue
+                    # Count total lines first for progress bar
+                    lines = [line for line in io.BytesIO(blob_bytes) if line.decode("utf-8").strip()]
+                    total_lines = len(lines)
 
-                        line_count += 1
+                    # Parse with progress bar
+                    with Progress(
+                        SpinnerColumn(),
+                        TextColumn("[progress.description]{task.description}"),
+                        BarColumn(),
+                        MofNCompleteColumn(),
+                        TaskProgressColumn(),
+                        TimeElapsedColumn(),
+                        console=console,
+                    ) as progress:
+                        task = progress.add_task("[cyan]Parsing results...", total=total_lines)
 
-                        try:
-                            record = json.loads(line_str)
+                        for line in lines:
+                            line_str = line.decode("utf-8").strip()
 
-                            # Extract key from record
-                            key = record.get("key", "")
-                            if not key:
-                                # Try to find key in request
-                                request = record.get("request", {})
-                                key = request.get("key", f"request_{len(results)}")
+                            try:
+                                record = json.loads(line_str)
 
-                            result_data: dict[str, Any] = {
-                                "success": False,
-                                "result": None,
-                                "error": None,
-                                "input_tokens": 0,
-                                "output_tokens": 0,
-                            }
+                                # Extract key from record
+                                key = record.get("key", "")
+                                if not key:
+                                    # Try to find key in request
+                                    request = record.get("request", {})
+                                    key = request.get("key", f"request_{len(results)}")
 
-                            # Parse response
-                            response = record.get("response", {})
-                            if response:
-                                candidates = response.get("candidates", [])
-                                if candidates:
-                                    candidate = candidates[0]
-                                    content_obj = candidate.get("content", {})
-                                    parts = content_obj.get("parts", [])
-                                    if parts:
-                                        text = parts[0].get("text", "")
-                                        if text:
-                                            try:
-                                                result_data["result"] = json.loads(text)
-                                                result_data["success"] = True
-                                            except json.JSONDecodeError:
-                                                result_data["result"] = {"raw_text": text}
-                                                result_data["success"] = True
+                                result_data: dict[str, Any] = {
+                                    "success": False,
+                                    "result": None,
+                                    "error": None,
+                                    "input_tokens": 0,
+                                    "output_tokens": 0,
+                                }
 
-                                # Extract usage metadata
-                                usage = response.get("usageMetadata", {})
-                                result_data["input_tokens"] = usage.get("promptTokenCount", 0) or 0
-                                result_data["output_tokens"] = usage.get("candidatesTokenCount", 0) or 0
-                                cost_info.input_tokens += result_data["input_tokens"]
-                                cost_info.output_tokens += result_data["output_tokens"]
+                                # Parse response
+                                response = record.get("response", {})
+                                if response:
+                                    candidates = response.get("candidates", [])
+                                    if candidates:
+                                        candidate = candidates[0]
+                                        content_obj = candidate.get("content", {})
+                                        parts = content_obj.get("parts", [])
+                                        if parts:
+                                            text = parts[0].get("text", "")
+                                            if text:
+                                                try:
+                                                    result_data["result"] = json.loads(text)
+                                                    result_data["success"] = True
+                                                except json.JSONDecodeError:
+                                                    result_data["result"] = {"raw_text": text}
+                                                    result_data["success"] = True
 
-                            # Check for error
-                            if "error" in record:
-                                result_data["error"] = str(record["error"])
-                                result_data["success"] = False
+                                    # Extract usage metadata
+                                    usage = response.get("usageMetadata", {})
+                                    result_data["input_tokens"] = usage.get("promptTokenCount", 0) or 0
+                                    result_data["output_tokens"] = usage.get("candidatesTokenCount", 0) or 0
+                                    cost_info.input_tokens += result_data["input_tokens"]
+                                    cost_info.output_tokens += result_data["output_tokens"]
 
-                            results[key] = result_data
+                                # Check for error
+                                if "error" in record:
+                                    result_data["error"] = str(record["error"])
+                                    result_data["success"] = False
 
-                        except json.JSONDecodeError as e:
-                            console.print(f"[yellow]Warning: Failed to parse JSONL line {line_count}: {e}[/yellow]")
-                            continue
+                                results[key] = result_data
 
-                    console.print(f"[dim]  Parsed {line_count} records[/dim]")
+                            except json.JSONDecodeError as e:
+                                console.print(f"[yellow]Warning: Failed to parse JSONL line: {e}[/yellow]")
+
+                            progress.advance(task)
+
+                    console.print(f"[dim]  Parsed {total_lines} records[/dim]")
 
         elif hasattr(dest, "inlined_responses") and dest.inlined_responses:
             # For inline requests, responses may not have keys

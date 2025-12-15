@@ -1225,30 +1225,90 @@ def _gemini_batch_resume() -> None:
     console.print(Panel.fit("🔄 Resume Batch Job", style="bold magenta"))
     console.print()
 
-    # Interactive input
-    job_file_str = Prompt.ask("[cyan]📄 Path to .job.json file[/cyan]")
-    job_file = _resolve_path(job_file_str)
+    # Ask for input type
+    input_type = Prompt.ask(
+        "[cyan]Enter job name or .job.json file path?[/cyan]",
+        choices=["name", "file"],
+        default="file",
+    )
+
     poll_interval = 30
+    job_file: Path | None = None
+    job_info: dict = {}
 
-    if not job_file.exists():
-        console.print(f"[red]❌ Job file not found: {job_file}[/red]")
-        raise typer.Exit(1)
+    if input_type == "file":
+        # File input mode
+        job_file_str = Prompt.ask("[cyan]📄 Path to .job.json file[/cyan]")
+        job_file = _resolve_path(job_file_str)
 
-    # Load job info
-    with open(job_file, encoding="utf-8") as f:
-        job_info = json.load(f)
+        if not job_file.exists():
+            console.print(f"[red]❌ Job file not found: {job_file}[/red]")
+            raise typer.Exit(1)
 
-    job_name = job_info["job_name"]
-    model = job_info["model"]
-    output_csv = Path(job_info["output_csv"])
-    prompt_version = job_info["prompt_version"]
-    request_keys = job_info["request_keys"]
-    use_vertex = job_info.get("use_vertex_ai", True)
+        # Load job info
+        with open(job_file, encoding="utf-8") as f:
+            job_info = json.load(f)
+
+        job_name = job_info["job_name"]
+        model = job_info["model"]
+        output_csv = Path(job_info["output_csv"])
+        prompt_version = job_info["prompt_version"]
+        request_keys = job_info["request_keys"]
+        use_vertex = job_info.get("use_vertex_ai", True)
+    else:
+        # Job name input mode
+        job_id_input = Prompt.ask("[cyan]🔑 Batch job name[/cyan]")
+
+        # If just an ID, construct full job name
+        if not job_id_input.startswith("projects/"):
+            # Need to get project info first
+            import os
+
+            project = os.getenv("GOOGLE_CLOUD_PROJECT")
+            if not project:
+                creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+                if creds_path and Path(creds_path).exists():
+                    try:
+                        with open(creds_path, encoding="utf-8") as f:
+                            creds_data = json.load(f)
+                            project = creds_data.get("project_id")
+                    except (OSError, json.JSONDecodeError):
+                        pass
+
+            if not project:
+                console.print("[red]❌ GOOGLE_CLOUD_PROJECT not set. Please provide full job name.[/red]")
+                raise typer.Exit(1)
+
+            location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+            job_name = f"projects/{project}/locations/{location}/batchPredictionJobs/{job_id_input}"
+        else:
+            job_name = job_id_input
+
+        # For name input mode, use defaults (will get actual info from API if needed)
+        model = "unknown"
+        prompt_version = "unknown"
+
+        # Generate output path
+        from datetime import datetime
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_csv = Path("results") / f"resume_{job_id_input[:8]}_{timestamp}.csv"
+        output_csv.parent.mkdir(parents=True, exist_ok=True)
+
+        request_keys = []  # Will be populated from job results
+        use_vertex = True  # Assume Vertex AI for job ID input
+
+    job_name = job_info.get("job_name", job_name) if job_info else job_name
+    model = job_info.get("model", model) if job_info else model
+    output_csv = Path(job_info.get("output_csv", str(output_csv))) if job_info else output_csv
+    prompt_version = job_info.get("prompt_version", prompt_version) if job_info else prompt_version
+    request_keys = job_info.get("request_keys", request_keys) if job_info else request_keys
+    use_vertex = job_info.get("use_vertex_ai", use_vertex) if job_info else use_vertex
 
     console.print(f"[cyan]Job name: {job_name}[/cyan]")
-    console.print(f"[cyan]Model: {model}[/cyan]")
-    console.print(f"[cyan]Output: {output_csv}[/cyan]")
-    console.print(f"[cyan]Requests: {len(request_keys)}[/cyan]")
+    if job_info:
+        console.print(f"[cyan]Model: {model}[/cyan]")
+        console.print(f"[cyan]Requests: {len(request_keys)}[/cyan]")
     console.print()
 
     # Setup logging
@@ -1328,99 +1388,12 @@ def _gemini_batch_resume() -> None:
         console.print("[cyan]Parsing batch results...[/cyan]")
         results, cost_info = parse_batch_results(client, final_job, request_keys, use_vertex_ai=use_vertex)
 
-        # Save results to CSV
-        import csv
-
-        output_csv.parent.mkdir(parents=True, exist_ok=True)
-
-        # Determine output format based on prompt analysis
-        # Read prompt file to check if it's a simple score output
-        prompt_path = Path("prompts") / f"{prompt_version}.txt"
-        use_simple_format = False
-        if prompt_path.exists():
-            prompt_content = prompt_path.read_text(encoding="utf-8")
-            # Check for simple score-only patterns
-            simple_patterns = ['{"score":', '"score": 점수', '"score":점수']
-            complex_patterns = ['"areas"', '"contaminations"', '"area_name"']
-            has_simple = any(p in prompt_content for p in simple_patterns)
-            has_complex = any(p in prompt_content for p in complex_patterns)
-            use_simple_format = has_simple and not has_complex
-
-        if use_simple_format:
-            # Simple format for score-only outputs (e.g., prompt-test)
-            fieldnames = [
-                "file_name",
-                "score",
-                "model",
-                "prompt_version",
-                "success",
-                "error",
-                "input_tokens",
-                "output_tokens",
-                "raw_response",
-            ]
-            console.print("[dim]Using simple output format (score-only)[/dim]")
-        else:
-            # Complex format for contamination analysis outputs
-            fieldnames = [
-                "file_name",
-                "GT",
-                "model",
-                "prompt_version",
-                "image_type",
-                "area_name",
-                "sub_area",
-                "contamination_type",
-                "max_severity",
-                "success",
-                "error",
-                "input_tokens",
-                "output_tokens",
-                "raw_response",
-            ]
-
-        with open(output_csv, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-
-            successful = 0
-            failed = 0
-
-            for key, result in results.items():
-                if use_simple_format:
-                    # Simple format: extract score directly
-                    parsed = result.get("result", {})
-                    score = ""
-                    if isinstance(parsed, dict):
-                        score = parsed.get("score", "")
-                    row = {
-                        "file_name": key,
-                        "score": score,
-                        "model": model,
-                        "prompt_version": prompt_version,
-                        "success": result.get("success", False),
-                        "error": result.get("error", ""),
-                        "input_tokens": result.get("input_tokens", 0),
-                        "output_tokens": result.get("output_tokens", 0),
-                        "raw_response": str(parsed) if parsed else "",
-                    }
-                else:
-                    # Complex format: use existing create_csv_row_from_result
-                    row = create_csv_row_from_result(
-                        file_name=key,
-                        original_data={"file_name": key, "GT": ""},
-                        result=result,
-                        model_name=model,
-                        prompt_version=prompt_version,
-                    )
-                writer.writerow(row)
-                if result.get("success"):
-                    successful += 1
-                else:
-                    failed += 1
+        # Count results
+        successful = sum(1 for r in results.values() if r.get("success"))
+        failed = len(results) - successful
 
         console.print()
-        console.print(f"[green]✅ Results saved to: {output_csv}[/green]")
+        console.print("[green]✅ Results parsed[/green]")
         console.print(f"[green]   Successful: {successful}[/green]")
         console.print(f"[red]   Failed: {failed}[/red]")
 
@@ -1432,7 +1405,7 @@ def _gemini_batch_resume() -> None:
             )
             console.print(f"[cyan]💰 Cost: ${cost_info.total_cost_usd:.6f} (₩{cost_info.total_cost_krw:.2f})[/cyan]")
 
-        # Update job_info with actual cost before saving
+        # Update job_info with actual cost and result count
         job_info["actual_cost"] = {
             "input_tokens": cost_info.input_tokens,
             "output_tokens": cost_info.output_tokens,
@@ -1441,13 +1414,125 @@ def _gemini_batch_resume() -> None:
             "input_cost_usd": cost_info.input_cost_usd,
             "output_cost_usd": cost_info.output_cost_usd,
         }
+        job_info["result_count"] = {
+            "successful": successful,
+            "failed": failed,
+            "total": len(results),
+        }
 
-        # Mark job as completed (save updated info and rename to .done.json)
-        done_file = job_file.with_suffix(".done.json")
-        with open(done_file, "w", encoding="utf-8") as f:
-            json.dump(job_info, f, indent=2, ensure_ascii=False)
-        job_file.unlink()  # Remove original file
-        console.print(f"[dim]Job file moved to: {done_file}[/dim]")
+        # Always save done.json
+        console.print()
+        if job_file is not None and job_file.exists():
+            done_file = job_file.with_suffix(".done.json")
+            with open(done_file, "w", encoding="utf-8") as f:
+                json.dump(job_info, f, indent=2, ensure_ascii=False)
+            job_file.unlink()  # Remove original file
+            console.print(f"[dim]Job file moved to: {done_file}[/dim]")
+        else:
+            # Save job info for name-based resume
+            from datetime import datetime
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            job_id = job_name.split("/")[-1] if "/" in job_name else job_name
+            done_file = Path("results") / f"resume_{job_id[:8]}_{timestamp}.done.json"
+            done_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(done_file, "w", encoding="utf-8") as f:
+                json.dump(job_info, f, indent=2, ensure_ascii=False)
+            console.print(f"[dim]Job info saved to: {done_file}[/dim]")
+
+        # Ask if user wants to generate CSV
+        console.print()
+        generate_csv = Prompt.ask(
+            "[cyan]📄 결과 CSV 파일을 생성하시겠습니까?[/cyan]",
+            choices=["y", "n"],
+            default="n",
+        )
+
+        if generate_csv.lower() == "y":
+            import csv
+
+            output_csv.parent.mkdir(parents=True, exist_ok=True)
+
+            # Determine output format based on prompt analysis
+            # Read prompt file to check if it's a simple score output
+            prompt_path = Path("prompts") / f"{prompt_version}.txt"
+            use_simple_format = False
+            if prompt_path.exists():
+                prompt_content = prompt_path.read_text(encoding="utf-8")
+                # Check for simple score-only patterns
+                simple_patterns = ['{"score":', '"score": 점수', '"score":점수']
+                complex_patterns = ['"areas"', '"contaminations"', '"area_name"']
+                has_simple = any(p in prompt_content for p in simple_patterns)
+                has_complex = any(p in prompt_content for p in complex_patterns)
+                use_simple_format = has_simple and not has_complex
+
+            if use_simple_format:
+                # Simple format for score-only outputs (e.g., prompt-test)
+                fieldnames = [
+                    "file_name",
+                    "score",
+                    "model",
+                    "prompt_version",
+                    "success",
+                    "error",
+                    "input_tokens",
+                    "output_tokens",
+                    "raw_response",
+                ]
+                console.print("[dim]Using simple output format (score-only)[/dim]")
+            else:
+                # Complex format for contamination analysis outputs
+                fieldnames = [
+                    "file_name",
+                    "GT",
+                    "model",
+                    "prompt_version",
+                    "image_type",
+                    "area_name",
+                    "sub_area",
+                    "contamination_type",
+                    "max_severity",
+                    "success",
+                    "error",
+                    "input_tokens",
+                    "output_tokens",
+                    "raw_response",
+                ]
+
+            with open(output_csv, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+
+                for key, result in results.items():
+                    if use_simple_format:
+                        # Simple format: extract score directly
+                        parsed = result.get("result", {})
+                        score = ""
+                        if isinstance(parsed, dict):
+                            score = parsed.get("score", "")
+                        row = {
+                            "file_name": key,
+                            "score": score,
+                            "model": model,
+                            "prompt_version": prompt_version,
+                            "success": result.get("success", False),
+                            "error": result.get("error", ""),
+                            "input_tokens": result.get("input_tokens", 0),
+                            "output_tokens": result.get("output_tokens", 0),
+                            "raw_response": str(parsed) if parsed else "",
+                        }
+                    else:
+                        # Complex format: use existing create_csv_row_from_result
+                        row = create_csv_row_from_result(
+                            file_name=key,
+                            original_data={"file_name": key, "GT": ""},
+                            result=result,
+                            model_name=model,
+                            prompt_version=prompt_version,
+                        )
+                    writer.writerow(row)
+
+            console.print(f"[green]✅ Results saved to: {output_csv}[/green]")
 
     except Exception as e:
         console.print(f"[red]❌ Error: {e}[/red]")
