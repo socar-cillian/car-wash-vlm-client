@@ -31,10 +31,13 @@ from google.genai import types
 from rich.console import Console
 from rich.progress import (
     BarColumn,
+    MofNCompleteColumn,
     Progress,
     SpinnerColumn,
+    TaskProgressColumn,
     TextColumn,
     TimeElapsedColumn,
+    TimeRemainingColumn,
 )
 from rich.prompt import Confirm
 from rich.table import Table
@@ -773,25 +776,43 @@ def prepare_inline_batch_requests(
     request_keys = []
     skipped_files = []
 
-    for data in image_data:
-        file_name = data.get("file_name", "")
-        if not file_name:
-            continue
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(bar_width=40),
+        TaskProgressColumn(),
+        MofNCompleteColumn(),
+        TextColumn("•"),
+        TimeElapsedColumn(),
+        TextColumn("•"),
+        TimeRemainingColumn(),
+        console=console,
+        refresh_per_second=4,
+    ) as progress:
+        task = progress.add_task("Preparing batch requests...", total=len(image_data))
 
-        image_path = images_dir / file_name
-        if not image_path.exists():
-            skipped_files.append(file_name)
-            continue
+        for data in image_data:
+            file_name = data.get("file_name", "")
+            if not file_name:
+                progress.advance(task)
+                continue
 
-        request = create_inline_batch_request(
-            image_path=image_path,
-            prompt=prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
+            image_path = images_dir / file_name
+            if not image_path.exists():
+                skipped_files.append(file_name)
+                progress.advance(task)
+                continue
 
-        inline_requests.append(request)
-        request_keys.append(file_name)
+            request = create_inline_batch_request(
+                image_path=image_path,
+                prompt=prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+
+            inline_requests.append(request)
+            request_keys.append(file_name)
+            progress.advance(task)
 
     return inline_requests, request_keys, skipped_files
 
@@ -821,28 +842,46 @@ def prepare_batch_requests_file(
     request_keys = []
     skipped_files = []
 
-    with open(output_jsonl, "w", encoding="utf-8") as f:
-        for data in image_data:
-            file_name = data.get("file_name", "")
-            if not file_name:
-                continue
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(bar_width=40),
+        TaskProgressColumn(),
+        MofNCompleteColumn(),
+        TextColumn("•"),
+        TimeElapsedColumn(),
+        TextColumn("•"),
+        TimeRemainingColumn(),
+        console=console,
+        refresh_per_second=4,
+    ) as progress:
+        task = progress.add_task("Preparing batch requests...", total=len(image_data))
 
-            image_path = images_dir / file_name
-            if not image_path.exists():
-                skipped_files.append(file_name)
-                continue
+        with open(output_jsonl, "w", encoding="utf-8") as f:
+            for data in image_data:
+                file_name = data.get("file_name", "")
+                if not file_name:
+                    progress.advance(task)
+                    continue
 
-            request_key = file_name  # Use filename as key for easy matching
-            request = create_batch_request(
-                image_path=image_path,
-                prompt=prompt,
-                request_key=request_key,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
+                image_path = images_dir / file_name
+                if not image_path.exists():
+                    skipped_files.append(file_name)
+                    progress.advance(task)
+                    continue
 
-            f.write(json.dumps(request) + "\n")
-            request_keys.append(request_key)
+                request_key = file_name  # Use filename as key for easy matching
+                request = create_batch_request(
+                    image_path=image_path,
+                    prompt=prompt,
+                    request_key=request_key,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+
+                f.write(json.dumps(request) + "\n")
+                request_keys.append(request_key)
+                progress.advance(task)
 
     return request_keys, skipped_files
 
@@ -872,22 +911,38 @@ def prepare_batch_requests_file_from_gcs(
     """
     request_keys = []
 
-    with open(output_jsonl, "w", encoding="utf-8") as f:
-        for gcs_uri in gcs_image_uris:
-            # Use filename as key for easy matching
-            file_name = Path(gcs_uri).name
-            request_key = file_name
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(bar_width=40),
+        TaskProgressColumn(),
+        MofNCompleteColumn(),
+        TextColumn("•"),
+        TimeElapsedColumn(),
+        TextColumn("•"),
+        TimeRemainingColumn(),
+        console=console,
+        refresh_per_second=4,
+    ) as progress:
+        task = progress.add_task("Preparing batch requests...", total=len(gcs_image_uris))
 
-            request = create_batch_request_with_gcs_uri(
-                gcs_uri=gcs_uri,
-                prompt=prompt,
-                request_key=request_key,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
+        with open(output_jsonl, "w", encoding="utf-8") as f:
+            for gcs_uri in gcs_image_uris:
+                # Use filename as key for easy matching
+                file_name = Path(gcs_uri).name
+                request_key = file_name
 
-            f.write(json.dumps(request) + "\n")
-            request_keys.append(request_key)
+                request = create_batch_request_with_gcs_uri(
+                    gcs_uri=gcs_uri,
+                    prompt=prompt,
+                    request_key=request_key,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+
+                f.write(json.dumps(request) + "\n")
+                request_keys.append(request_key)
+                progress.advance(task)
 
     return request_keys
 
