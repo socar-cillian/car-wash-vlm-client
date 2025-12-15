@@ -43,6 +43,7 @@ from src.inference.pricing import (
     AVERAGE_OUTPUT_TOKENS,
     TOKENS_PER_IMAGE_ESTIMATE,
     CostInfo,
+    estimate_output_tokens_from_prompt,
 )
 from src.inference.pricing import (
     estimate_image_tokens as pricing_estimate_image_tokens,
@@ -1017,7 +1018,121 @@ def parse_batch_results(
     if hasattr(job, "dest") and job.dest:
         # Results are stored in destination
         dest = job.dest
-        if hasattr(dest, "inlined_responses") and dest.inlined_responses:
+
+        # Check for GCS output (Vertex AI stores results in GCS)
+        gcs_output_uri = None
+        if hasattr(dest, "gcs_uri") and dest.gcs_uri:
+            gcs_output_uri = dest.gcs_uri
+        elif hasattr(dest, "output_uri_prefix") and dest.output_uri_prefix:
+            gcs_output_uri = dest.output_uri_prefix
+
+        if gcs_output_uri:
+            # Vertex AI mode: download and parse JSONL from GCS
+            console.print(f"[cyan]Downloading results from GCS: {gcs_output_uri}[/cyan]")
+
+            # List all JSONL files in the output directory
+            storage_client = _get_storage_client()
+
+            # Parse GCS URI
+            gcs_path = gcs_output_uri[5:] if gcs_output_uri.startswith("gs://") else gcs_output_uri
+
+            parts = gcs_path.split("/", 1)
+            bucket_name = parts[0]
+            prefix = parts[1] if len(parts) > 1 else ""
+
+            # Ensure prefix ends with /
+            if prefix and not prefix.endswith("/"):
+                prefix += "/"
+
+            bucket = storage_client.bucket(bucket_name)
+            blobs = list(bucket.list_blobs(prefix=prefix))
+
+            # Find predictions JSONL files
+            jsonl_blobs = [b for b in blobs if b.name.endswith(".jsonl")]
+
+            if not jsonl_blobs:
+                console.print(f"[yellow]Warning: No JSONL files found in {gcs_output_uri}[/yellow]")
+                console.print(f"[dim]Found {len(blobs)} files in bucket:[/dim]")
+                for b in blobs[:10]:
+                    console.print(f"[dim]  - {b.name}[/dim]")
+            else:
+                console.print(f"[green]Found {len(jsonl_blobs)} JSONL file(s)[/green]")
+
+                for blob in jsonl_blobs:
+                    console.print(f"[dim]Processing: gs://{bucket_name}/{blob.name}[/dim]")
+
+                    # Stream download and parse JSONL content line by line
+                    # This is memory-efficient for large files
+                    import io
+
+                    # Download to a bytes buffer and read line by line
+                    blob_bytes = blob.download_as_bytes()
+                    line_count = 0
+
+                    for line in io.BytesIO(blob_bytes):
+                        line_str = line.decode("utf-8").strip()
+                        if not line_str:
+                            continue
+
+                        line_count += 1
+
+                        try:
+                            record = json.loads(line_str)
+
+                            # Extract key from record
+                            key = record.get("key", "")
+                            if not key:
+                                # Try to find key in request
+                                request = record.get("request", {})
+                                key = request.get("key", f"request_{len(results)}")
+
+                            result_data: dict[str, Any] = {
+                                "success": False,
+                                "result": None,
+                                "error": None,
+                                "input_tokens": 0,
+                                "output_tokens": 0,
+                            }
+
+                            # Parse response
+                            response = record.get("response", {})
+                            if response:
+                                candidates = response.get("candidates", [])
+                                if candidates:
+                                    candidate = candidates[0]
+                                    content_obj = candidate.get("content", {})
+                                    parts = content_obj.get("parts", [])
+                                    if parts:
+                                        text = parts[0].get("text", "")
+                                        if text:
+                                            try:
+                                                result_data["result"] = json.loads(text)
+                                                result_data["success"] = True
+                                            except json.JSONDecodeError:
+                                                result_data["result"] = {"raw_text": text}
+                                                result_data["success"] = True
+
+                                # Extract usage metadata
+                                usage = response.get("usageMetadata", {})
+                                result_data["input_tokens"] = usage.get("promptTokenCount", 0) or 0
+                                result_data["output_tokens"] = usage.get("candidatesTokenCount", 0) or 0
+                                cost_info.input_tokens += result_data["input_tokens"]
+                                cost_info.output_tokens += result_data["output_tokens"]
+
+                            # Check for error
+                            if "error" in record:
+                                result_data["error"] = str(record["error"])
+                                result_data["success"] = False
+
+                            results[key] = result_data
+
+                        except json.JSONDecodeError as e:
+                            console.print(f"[yellow]Warning: Failed to parse JSONL line {line_count}: {e}[/yellow]")
+                            continue
+
+                    console.print(f"[dim]  Parsed {line_count} records[/dim]")
+
+        elif hasattr(dest, "inlined_responses") and dest.inlined_responses:
             # For inline requests, responses may not have keys
             # We match by index with request_keys
             for idx, response in enumerate(dest.inlined_responses):
@@ -1030,7 +1145,7 @@ def parse_batch_results(
                 else:
                     key = f"request_{idx}"
 
-                result_data: dict[str, Any] = {
+                result_data = {
                     "success": False,
                     "result": None,
                     "error": None,
@@ -1104,6 +1219,31 @@ def create_csv_row_from_result(
         return row
 
     parsed = result.get("result", {})
+
+    # Handle case where parsed is a list (some responses return array)
+    if isinstance(parsed, list):
+        # If it's a list, try to use the first element or convert to dict
+        if len(parsed) > 0 and isinstance(parsed[0], dict):
+            parsed = parsed[0]
+        else:
+            # Store raw list as response
+            row["image_type"] = ""
+            row["area_name"] = ""
+            row["sub_area"] = ""
+            row["contamination_type"] = ""
+            row["max_severity"] = ""
+            row["raw_response"] = str(parsed)
+            return row
+
+    # Ensure parsed is a dict
+    if not isinstance(parsed, dict):
+        row["image_type"] = ""
+        row["area_name"] = ""
+        row["sub_area"] = ""
+        row["contamination_type"] = ""
+        row["max_severity"] = ""
+        row["raw_response"] = str(parsed)
+        return row
 
     # Extract image_type
     row["image_type"] = parsed.get("image_type", "")
@@ -1314,33 +1454,52 @@ def run_gemini_batch_inference(
 
     else:
         # Local mode: load from CSV and local directory
-        if input_csv is None:
-            raise ValueError("input_csv is required when using local images directory")
-
         images_dir = Path(images_dir)
 
-        console.print(f"[cyan]Loading input CSV from {input_csv}[/cyan]")
+        if input_csv is not None and input_csv.exists():
+            # CSV provided: load image list from CSV
+            console.print(f"[cyan]Loading input CSV from {input_csv}[/cyan]")
 
-        with open(input_csv, encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            input_csv_columns = list(reader.fieldnames or [])
-            for row in reader:
-                file_name = row.get("file_name") or row.get("image_name", "")
-                if not file_name:
-                    filename_val = row.get("filename", "")
-                    if filename_val:
-                        file_name = Path(filename_val).name
-                if not file_name:
-                    url = row.get("file_url") or row.get("image_url", "")
-                    if url:
-                        parsed = urlparse(url)
-                        file_name = Path(parsed.path).name
-                if file_name:
-                    row["file_name"] = file_name
-                    image_data.append(dict(row))
+            with open(input_csv, encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                input_csv_columns = list(reader.fieldnames or [])
+                for row in reader:
+                    file_name = row.get("file_name") or row.get("image_name", "")
+                    if not file_name:
+                        filename_val = row.get("filename", "")
+                        if filename_val:
+                            file_name = Path(filename_val).name
+                    if not file_name:
+                        url = row.get("file_url") or row.get("image_url", "")
+                        if url:
+                            parsed = urlparse(url)
+                            file_name = Path(parsed.path).name
+                    if file_name:
+                        row["file_name"] = file_name
+                        image_data.append(dict(row))
+        else:
+            # No CSV: scan local directory for all images
+            console.print(f"[cyan]Scanning local directory for images: {images_dir}[/cyan]")
+
+            if not images_dir.exists():
+                raise ValueError(f"Images directory not found: {images_dir}")
+
+            image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+            local_image_files = sorted(
+                f for f in images_dir.iterdir() if f.is_file() and f.suffix.lower() in image_extensions
+            )
+
+            if not local_image_files:
+                raise ValueError(f"No image files found in directory: {images_dir}")
+
+            console.print(f"[green]Found {len(local_image_files)} images in local directory[/green]")
+
+            # Create image_data from local files
+            image_data = [{"file_name": f.name} for f in local_image_files]
+            input_csv_columns = ["file_name"]
 
     if not image_data and not gcs_image_uris:
-        raise ValueError(f"No valid entries found in {input_csv}")
+        raise ValueError("No valid images found to process")
 
     if use_gcs_images:
         console.print(f"[green]Found {len(gcs_image_uris)} images to process from GCS[/green]")
@@ -1374,6 +1533,10 @@ def run_gemini_batch_inference(
     # Estimate and display cost before proceeding
     console.print()
 
+    # Estimate output tokens based on prompt complexity
+    estimated_output_tokens = estimate_output_tokens_from_prompt(prompt)
+    console.print(f"[dim]Estimated output tokens per image: {estimated_output_tokens} (based on prompt analysis)[/dim]")
+
     if use_gcs_images:
         # For GCS images, use simple estimation (can't sample without downloading)
         console.print("[bold yellow]━━━ Estimated Cost (Simple Estimation) ━━━[/bold yellow]")
@@ -1393,7 +1556,7 @@ def run_gemini_batch_inference(
             num_images=num_images,
             model=model,
             prompt_tokens=prompt_tokens,
-            output_tokens_per_image=AVERAGE_OUTPUT_TOKENS,
+            output_tokens_per_image=estimated_output_tokens,
             use_vertex_ai=use_vertex,
         )
         cost_estimate["sampled_images"] = 0
@@ -1405,7 +1568,7 @@ def run_gemini_batch_inference(
             model=model,
             prompt=prompt,
             image_paths=valid_image_paths,
-            output_tokens_per_image=AVERAGE_OUTPUT_TOKENS,
+            output_tokens_per_image=estimated_output_tokens,
             use_vertex_ai=use_vertex,
             sample_size=5,
         )

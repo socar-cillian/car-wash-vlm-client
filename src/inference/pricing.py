@@ -279,13 +279,75 @@ class CostInfo:
 # =============================================================================
 # Default values for estimation when API token counting is unavailable
 
-# Average output tokens (estimated for JSON response with contamination data)
-# Typical response includes: image_type, areas array with contaminations
-AVERAGE_OUTPUT_TOKENS = 500
+# Output tokens by prompt complexity
+# Based on actual measurements from batch jobs
+OUTPUT_TOKENS_SIMPLE = 50  # Simple JSON like {"score": 0}
+OUTPUT_TOKENS_MEDIUM = 150  # Medium complexity with a few fields
+OUTPUT_TOKENS_COMPLEX = 400  # Complex JSON with nested arrays (contaminations)
+
+# Legacy default for backward compatibility
+AVERAGE_OUTPUT_TOKENS = OUTPUT_TOKENS_COMPLEX
 
 # Default image tokens for estimation fallback
 # Uses Gemini 3 Pro MEDIUM resolution as default
 TOKENS_PER_IMAGE_ESTIMATE = GEMINI_3_IMAGE_TOKENS["medium"]  # 560 tokens
+
+
+def estimate_output_tokens_from_prompt(prompt: str) -> int:
+    """
+    Estimate output tokens based on prompt analysis.
+
+    Analyzes the prompt to determine expected output complexity:
+    - Simple: Single value responses like {"score": 0}
+    - Medium: A few fields without nested arrays
+    - Complex: Nested structures with arrays (contaminations, areas, etc.)
+
+    Args:
+        prompt: The full prompt text
+
+    Returns:
+        Estimated output tokens per response
+    """
+    prompt_lower = prompt.lower()
+
+    # Check for simple score-only output patterns
+    simple_patterns = [
+        '{"score":',
+        '{"score" :',
+        '"score": 점수',
+        '"score":점수',
+        "json만 출력",  # Simple JSON only instruction
+    ]
+
+    # Check for complex nested array patterns
+    complex_patterns = [
+        '"areas"',
+        '"contaminations"',
+        '"area_name"',
+        '"contamination_type"',
+        '"severity"',
+        "areas array",
+        "오염 항목",
+        "검수 부위",
+    ]
+
+    # Count pattern matches
+    simple_matches = sum(1 for p in simple_patterns if p in prompt_lower or p in prompt)
+    complex_matches = sum(1 for p in complex_patterns if p in prompt_lower or p in prompt)
+
+    # Determine complexity
+    if complex_matches >= 3:
+        # Complex output with nested arrays
+        return OUTPUT_TOKENS_COMPLEX
+    elif simple_matches >= 2 and complex_matches == 0:
+        # Simple single-value output
+        return OUTPUT_TOKENS_SIMPLE
+    elif complex_matches >= 1:
+        # Some complexity but not full contamination report
+        return OUTPUT_TOKENS_MEDIUM
+    else:
+        # Default to medium
+        return OUTPUT_TOKENS_MEDIUM
 
 
 # =============================================================================

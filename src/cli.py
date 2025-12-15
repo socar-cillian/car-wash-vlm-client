@@ -13,7 +13,11 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from src.api import VLMClient
-from src.inference import parse_batch_output, run_batch_inference, run_gemini_batch_inference
+from src.inference import (
+    parse_batch_output,
+    run_batch_inference,
+    run_gemini_batch_inference,
+)
 from src.prompts import generate_prompt, parse_guideline
 
 
@@ -201,7 +205,11 @@ def batch_inference_menu() -> None:
     menu_table.add_column("설명", style="dim")
 
     menu_table.add_row("[bold green]1[/]", "📄 CSV 모드", "CSV 파일 기반 추론 (GT 비교용)")
-    menu_table.add_row("[bold green]2[/]", "📁 폴더 모드", "폴더 내 모든 이미지 추론 (raw response 수집)")
+    menu_table.add_row(
+        "[bold green]2[/]",
+        "📁 폴더 모드",
+        "폴더 내 모든 이미지 추론 (raw response 수집)",
+    )
     menu_table.add_row("[bold red]0[/]", "🚪 종료", "종료")
 
     console.print(menu_table)
@@ -250,7 +258,10 @@ def _batch_infer_csv_mode() -> None:
     prompt = _resolve_path(prompt_str)
 
     # Ask for limit
-    limit_str = Prompt.ask("[cyan]🔢 Maximum number of images to process (press Enter for all)[/cyan]", default="")
+    limit_str = Prompt.ask(
+        "[cyan]🔢 Maximum number of images to process (press Enter for all)[/cyan]",
+        default="",
+    )
     if limit_str and limit_str.strip():
         try:
             limit = int(limit_str)
@@ -265,7 +276,9 @@ def _batch_infer_csv_mode() -> None:
 
     # Ask for namespace
     namespace = Prompt.ask(
-        "[cyan]🏷️  Select namespace (vllm / vllm-test)[/cyan]", choices=["vllm", "vllm-test"], default="vllm-test"
+        "[cyan]🏷️  Select namespace (vllm / vllm-test)[/cyan]",
+        choices=["vllm", "vllm-test"],
+        default="vllm-test",
     )
 
     console.print()
@@ -445,7 +458,10 @@ def _batch_infer_csv_mode() -> None:
         summary_table.add_row("❌ Failed", f"[red]{summary['failed']}[/red]")
         summary_table.add_row("⏱️  Total time", f"[bold yellow]{summary['total_time']:.2f}s[/bold yellow]")
         summary_table.add_row("🚀 Throughput", f"[bold magenta]{throughput:.2f} images/sec[/bold magenta]")
-        summary_table.add_row("📊 Time per image (avg)", f"[bold cyan]{summary['avg_time_per_image']:.2f}s[/bold cyan]")
+        summary_table.add_row(
+            "📊 Time per image (avg)",
+            f"[bold cyan]{summary['avg_time_per_image']:.2f}s[/bold cyan]",
+        )
         summary_table.add_row("⚡ API latency (avg)", f"{summary['avg_latency']:.3f}s")
         summary_table.add_row("⚙️  Parallel speedup", f"[bold green]{speedup:.1f}x[/bold green]")
         summary_table.add_row("💾 Results saved to", str(summary["output_path"]))
@@ -544,7 +560,10 @@ def _batch_infer_folder_mode() -> None:
     prompt = _resolve_path(prompt_str)
 
     # Ask for limit
-    limit_str = Prompt.ask("[cyan]🔢 Maximum number of images to process (press Enter for all)[/cyan]", default="")
+    limit_str = Prompt.ask(
+        "[cyan]🔢 Maximum number of images to process (press Enter for all)[/cyan]",
+        default="",
+    )
     if limit_str and limit_str.strip():
         try:
             limit = int(limit_str)
@@ -559,7 +578,9 @@ def _batch_infer_folder_mode() -> None:
 
     # Ask for namespace
     namespace = Prompt.ask(
-        "[cyan]🏷️  Select namespace (vllm / vllm-test)[/cyan]", choices=["vllm", "vllm-test"], default="vllm-test"
+        "[cyan]🏷️  Select namespace (vllm / vllm-test)[/cyan]",
+        choices=["vllm", "vllm-test"],
+        default="vllm-test",
     )
 
     console.print()
@@ -819,7 +840,8 @@ def _gemini_batch_infer() -> None:
         # For GCS, input_csv is optional
         if input_csv is None:
             csv_str = Prompt.ask(
-                "[cyan]📄 Input CSV file path (optional, press Enter to use all GCS images)[/cyan]", default=""
+                "[cyan]📄 Input CSV file path (optional, press Enter to use all GCS images)[/cyan]",
+                default="",
             )
             if csv_str and csv_str.strip():
                 # Check if CSV is also in GCS
@@ -853,10 +875,14 @@ def _gemini_batch_infer() -> None:
                 else:
                     input_csv = _resolve_path(csv_str)
     else:
-        # For local, input_csv is required
+        # For local, input_csv is optional (will scan directory if not provided)
         if input_csv is None:
-            input_csv_str = Prompt.ask("[cyan]📄 Input CSV file path[/cyan]")
-            input_csv = _resolve_path(input_csv_str)
+            input_csv_str = Prompt.ask(
+                "[cyan]📄 Input CSV file path (optional, press Enter to use all images in directory)[/cyan]",
+                default="",
+            )
+            if input_csv_str and input_csv_str.strip():
+                input_csv = _resolve_path(input_csv_str)
 
     if prompt is None:
         prompt_str = Prompt.ask("[cyan]📝 Prompt file path[/cyan]")
@@ -864,7 +890,10 @@ def _gemini_batch_infer() -> None:
 
     # Ask for limit if not provided
     if limit is None:
-        limit_str = Prompt.ask("[cyan]🔢 Maximum number of images to process (press Enter for all)[/cyan]", default="")
+        limit_str = Prompt.ask(
+            "[cyan]🔢 Maximum number of images to process (press Enter for all)[/cyan]",
+            default="",
+        )
         if limit_str and limit_str.strip():
             try:
                 limit = int(limit_str)
@@ -930,18 +959,20 @@ def _gemini_batch_infer() -> None:
 
     # Ask for GCS bucket if using Vertex AI and not provided
     if use_vertex and gcs_bucket is None:
-        gcs_bucket_str = Prompt.ask(
-            "[cyan]🪣 GCS bucket name (for Vertex AI batch jobs)[/cyan]", default=os.getenv("GCS_BUCKET_NAME", "")
-        )
-        if gcs_bucket_str and gcs_bucket_str.strip():
-            gcs_bucket = gcs_bucket_str.strip()
+        default_bucket = os.getenv("GCS_BUCKET_NAME", "cillian-car-wash-inspection")
+        console.print(f"[cyan]🪣 GCS bucket name[/cyan] [dim]({default_bucket})[/dim]: ", end="")
+        gcs_bucket_input = input().strip()
+        gcs_bucket = gcs_bucket_input if gcs_bucket_input else default_bucket
 
     # Display configuration
     config_table = Table(title="⚙️  Configuration", show_header=False, box=None)
     config_table.add_column("Key", style="cyan", width=20)
     config_table.add_column("Value", style="white")
 
-    config_table.add_row("📄 Input CSV", str(input_csv) if input_csv else "(all GCS images)")
+    config_table.add_row(
+        "📄 Input CSV",
+        (str(input_csv) if input_csv else ("(all GCS images)" if is_gcs_path else "(all local images)")),
+    )
     config_table.add_row("📁 Images", images_dir_str + (" (GCS)" if is_gcs_path else " (local)"))
     config_table.add_row("📝 Prompt file", str(prompt))
     config_table.add_row("💾 Output CSV", str(output))
@@ -1046,9 +1077,18 @@ def _gemini_batch_infer() -> None:
             cost_table.add_row("📊 Total Tokens", str(cost.get("total_tokens", 0)))
             cost_table.add_row("💵 Input Cost (USD)", cost.get("input_cost_usd", "$0.00"))
             cost_table.add_row("💵 Output Cost (USD)", cost.get("output_cost_usd", "$0.00"))
-            cost_table.add_row("💰 Total Cost (USD)", f"[bold green]{cost.get('total_cost_usd', '$0.00')}[/bold green]")
-            cost_table.add_row("💴 Total Cost (KRW)", f"[bold green]{cost.get('total_cost_krw', '₩0.00')}[/bold green]")
-            cost_table.add_row("🏷️  Batch Pricing", "Yes (50% input discount)" if cost.get("is_batch_pricing") else "No")
+            cost_table.add_row(
+                "💰 Total Cost (USD)",
+                f"[bold green]{cost.get('total_cost_usd', '$0.00')}[/bold green]",
+            )
+            cost_table.add_row(
+                "💴 Total Cost (KRW)",
+                f"[bold green]{cost.get('total_cost_krw', '₩0.00')}[/bold green]",
+            )
+            cost_table.add_row(
+                "🏷️  Batch Pricing",
+                "Yes (50% input discount)" if cost.get("is_batch_pricing") else "No",
+            )
 
             console.print(cost_table)
             console.print()
@@ -1079,7 +1119,12 @@ def _gemini_batch_infer() -> None:
             msg = f"⚠️  Completed with {summary['failed']} failures ({success_rate:.1f}% success rate)"
             console.print(Panel.fit(msg, style="bold yellow"))
         else:
-            console.print(Panel.fit("✓ Gemini batch inference completed successfully!", style="bold green"))
+            console.print(
+                Panel.fit(
+                    "✓ Gemini batch inference completed successfully!",
+                    style="bold green",
+                )
+            )
 
     except typer.Exit:
         # Re-raise typer.Exit to allow clean exit
@@ -1288,19 +1333,51 @@ def _gemini_batch_resume() -> None:
 
         output_csv.parent.mkdir(parents=True, exist_ok=True)
 
-        fieldnames = [
-            "file_name",
-            "GT",
-            "model",
-            "prompt_version",
-            "area_name",
-            "sub_area",
-            "contamination_type",
-            "max_severity",
-            "success",
-            "error",
-            "raw_response",
-        ]
+        # Determine output format based on prompt analysis
+        # Read prompt file to check if it's a simple score output
+        prompt_path = Path("prompts") / f"{prompt_version}.txt"
+        use_simple_format = False
+        if prompt_path.exists():
+            prompt_content = prompt_path.read_text(encoding="utf-8")
+            # Check for simple score-only patterns
+            simple_patterns = ['{"score":', '"score": 점수', '"score":점수']
+            complex_patterns = ['"areas"', '"contaminations"', '"area_name"']
+            has_simple = any(p in prompt_content for p in simple_patterns)
+            has_complex = any(p in prompt_content for p in complex_patterns)
+            use_simple_format = has_simple and not has_complex
+
+        if use_simple_format:
+            # Simple format for score-only outputs (e.g., prompt-test)
+            fieldnames = [
+                "file_name",
+                "score",
+                "model",
+                "prompt_version",
+                "success",
+                "error",
+                "input_tokens",
+                "output_tokens",
+                "raw_response",
+            ]
+            console.print("[dim]Using simple output format (score-only)[/dim]")
+        else:
+            # Complex format for contamination analysis outputs
+            fieldnames = [
+                "file_name",
+                "GT",
+                "model",
+                "prompt_version",
+                "image_type",
+                "area_name",
+                "sub_area",
+                "contamination_type",
+                "max_severity",
+                "success",
+                "error",
+                "input_tokens",
+                "output_tokens",
+                "raw_response",
+            ]
 
         with open(output_csv, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -1310,13 +1387,32 @@ def _gemini_batch_resume() -> None:
             failed = 0
 
             for key, result in results.items():
-                row = create_csv_row_from_result(
-                    file_name=key,
-                    original_data={"file_name": key, "GT": ""},
-                    result=result,
-                    model_name=model,
-                    prompt_version=prompt_version,
-                )
+                if use_simple_format:
+                    # Simple format: extract score directly
+                    parsed = result.get("result", {})
+                    score = ""
+                    if isinstance(parsed, dict):
+                        score = parsed.get("score", "")
+                    row = {
+                        "file_name": key,
+                        "score": score,
+                        "model": model,
+                        "prompt_version": prompt_version,
+                        "success": result.get("success", False),
+                        "error": result.get("error", ""),
+                        "input_tokens": result.get("input_tokens", 0),
+                        "output_tokens": result.get("output_tokens", 0),
+                        "raw_response": str(parsed) if parsed else "",
+                    }
+                else:
+                    # Complex format: use existing create_csv_row_from_result
+                    row = create_csv_row_from_result(
+                        file_name=key,
+                        original_data={"file_name": key, "GT": ""},
+                        result=result,
+                        model_name=model,
+                        prompt_version=prompt_version,
+                    )
                 writer.writerow(row)
                 if result.get("success"):
                     successful += 1
@@ -1328,9 +1424,29 @@ def _gemini_batch_resume() -> None:
         console.print(f"[green]   Successful: {successful}[/green]")
         console.print(f"[red]   Failed: {failed}[/red]")
 
-        # Mark job as completed (rename to .done.json instead of deleting)
+        # Display cost info
+        if cost_info.input_tokens > 0 or cost_info.output_tokens > 0:
+            console.print()
+            console.print(
+                f"[cyan]📊 Tokens: {cost_info.input_tokens:,} input, {cost_info.output_tokens:,} output[/cyan]"
+            )
+            console.print(f"[cyan]💰 Cost: ${cost_info.total_cost_usd:.6f} (₩{cost_info.total_cost_krw:.2f})[/cyan]")
+
+        # Update job_info with actual cost before saving
+        job_info["actual_cost"] = {
+            "input_tokens": cost_info.input_tokens,
+            "output_tokens": cost_info.output_tokens,
+            "total_cost_usd": cost_info.total_cost_usd,
+            "total_cost_krw": cost_info.total_cost_krw,
+            "input_cost_usd": cost_info.input_cost_usd,
+            "output_cost_usd": cost_info.output_cost_usd,
+        }
+
+        # Mark job as completed (save updated info and rename to .done.json)
         done_file = job_file.with_suffix(".done.json")
-        job_file.rename(done_file)
+        with open(done_file, "w", encoding="utf-8") as f:
+            json.dump(job_info, f, indent=2, ensure_ascii=False)
+        job_file.unlink()  # Remove original file
         console.print(f"[dim]Job file moved to: {done_file}[/dim]")
 
     except Exception as e:
@@ -1697,14 +1813,40 @@ def _gemini_batch_info() -> None:
         if hasattr(job, "update_time") and job.update_time:
             timing_table.add_row("🔄 Updated", str(job.update_time))
 
-        # Calculate durations
-        if hasattr(job, "start_time") and hasattr(job, "end_time") and job.start_time and job.end_time:
-            duration = (job.end_time - job.start_time).total_seconds()
-            timing_table.add_row("⏱️  Processing Duration", f"[bold yellow]{duration:.1f}s[/bold yellow]")
+        # Helper function to format duration
+        def format_duration(seconds: float) -> str:
+            """Format duration in human-readable format (days, hours, minutes, seconds)."""
+            if seconds < 60:
+                return f"{seconds:.1f}s"
+            elif seconds < 3600:
+                minutes = int(seconds // 60)
+                secs = seconds % 60
+                return f"{minutes}m {secs:.1f}s"
+            elif seconds < 86400:
+                hours = int(seconds // 3600)
+                minutes = int((seconds % 3600) // 60)
+                secs = seconds % 60
+                return f"{hours}h {minutes}m {secs:.0f}s"
+            else:
+                days = int(seconds // 86400)
+                hours = int((seconds % 86400) // 3600)
+                minutes = int((seconds % 3600) // 60)
+                return f"{days}d {hours}h {minutes}m"
 
-        if hasattr(job, "create_time") and hasattr(job, "start_time") and job.create_time and job.start_time:
-            queue_wait = (job.start_time - job.create_time).total_seconds()
-            timing_table.add_row("⏳ Queue Wait", f"{queue_wait:.1f}s")
+        # Calculate durations
+        if hasattr(job, "create_time") and hasattr(job, "end_time") and job.create_time and job.end_time:
+            total_duration = (job.end_time - job.create_time).total_seconds()
+            timing_table.add_row(
+                "📊 Total Duration",
+                f"[bold green]{format_duration(total_duration)}[/bold green] (created → ended)",
+            )
+
+        if hasattr(job, "start_time") and hasattr(job, "end_time") and job.start_time and job.end_time:
+            processing_duration = (job.end_time - job.start_time).total_seconds()
+            timing_table.add_row(
+                "⏱️  Processing Time",
+                f"[bold yellow]{format_duration(processing_duration)}[/bold yellow] (started → ended)",
+            )
 
         console.print(timing_table)
         console.print()
@@ -1726,7 +1868,10 @@ def _gemini_batch_info() -> None:
                         gcs_uri_str = str(gcs_uri_val)
                     io_table.add_row("📥 Input GCS URI", gcs_uri_str)
                 elif hasattr(src, "inlined_requests") and src.inlined_requests:
-                    io_table.add_row("📥 Input Type", f"Inline ({len(src.inlined_requests)} requests)")
+                    io_table.add_row(
+                        "📥 Input Type",
+                        f"Inline ({len(src.inlined_requests)} requests)",
+                    )
 
             if hasattr(job, "dest") and job.dest:
                 dest = job.dest
@@ -1739,7 +1884,10 @@ def _gemini_batch_info() -> None:
                         gcs_uri_str = str(dest_gcs_uri)
                     io_table.add_row("📤 Output GCS URI", gcs_uri_str)
                 elif hasattr(dest, "inlined_responses") and dest.inlined_responses:
-                    io_table.add_row("📤 Output Type", f"Inline ({len(dest.inlined_responses)} responses)")
+                    io_table.add_row(
+                        "📤 Output Type",
+                        f"Inline ({len(dest.inlined_responses)} responses)",
+                    )
 
             console.print(io_table)
             console.print()
@@ -1768,6 +1916,173 @@ def _gemini_batch_info() -> None:
 
             console.print(local_table)
             console.print()
+
+            # Cost/Token info table
+            cost_estimate = local_job_info.get("cost_estimate", {})
+            actual_cost = local_job_info.get("actual_cost", {})
+
+            # Check if job is completed to show actual vs estimated
+            is_completed = state == "JOB_STATE_SUCCEEDED"
+
+            # If job is completed but no actual_cost, try to fetch from GCS
+            if is_completed and not actual_cost and hasattr(job, "dest") and job.dest:
+                dest = job.dest
+                gcs_output_uri = None
+                if hasattr(dest, "gcs_uri") and dest.gcs_uri:
+                    gcs_output_uri = dest.gcs_uri
+                elif hasattr(dest, "output_uri_prefix") and dest.output_uri_prefix:
+                    gcs_output_uri = dest.output_uri_prefix
+
+                if gcs_output_uri:
+                    try:
+                        from google.cloud import storage
+
+                        console.print("[dim]Fetching actual token usage from GCS...[/dim]")
+
+                        # Parse GCS URI
+                        gcs_path = gcs_output_uri[5:] if gcs_output_uri.startswith("gs://") else gcs_output_uri
+
+                        parts = gcs_path.split("/", 1)
+                        bucket_name = parts[0]
+                        prefix = parts[1] if len(parts) > 1 else ""
+                        if prefix and not prefix.endswith("/"):
+                            prefix += "/"
+
+                        storage_client = storage.Client()
+                        bucket = storage_client.bucket(bucket_name)
+                        blobs = list(bucket.list_blobs(prefix=prefix))
+                        jsonl_blobs = [b for b in blobs if b.name.endswith(".jsonl")]
+
+                        if jsonl_blobs:
+                            import io
+
+                            total_input_tokens = 0
+                            total_output_tokens = 0
+
+                            for blob in jsonl_blobs:
+                                blob_bytes = blob.download_as_bytes()
+                                for line in io.BytesIO(blob_bytes):
+                                    line_str = line.decode("utf-8").strip()
+                                    if not line_str:
+                                        continue
+                                    try:
+                                        record = json.loads(line_str)
+                                        response = record.get("response", {})
+                                        usage = response.get("usageMetadata", {})
+                                        total_input_tokens += usage.get("promptTokenCount", 0) or 0
+                                        total_output_tokens += usage.get("candidatesTokenCount", 0) or 0
+                                    except json.JSONDecodeError:
+                                        continue
+
+                            if total_input_tokens > 0 or total_output_tokens > 0:
+                                # Calculate costs using CostInfo from pricing module
+                                from src.inference.pricing import CostInfo
+
+                                model_name = str(job.model) if hasattr(job, "model") else "gemini-2.5-flash"
+                                cost_calc = CostInfo(
+                                    input_tokens=total_input_tokens,
+                                    output_tokens=total_output_tokens,
+                                    model=model_name,
+                                    is_batch=True,
+                                    use_vertex_ai=True,
+                                )
+                                cost_calc.calculate_costs()
+
+                                actual_cost = {
+                                    "input_tokens": total_input_tokens,
+                                    "output_tokens": total_output_tokens,
+                                    "input_cost_usd": cost_calc.input_cost_usd,
+                                    "output_cost_usd": cost_calc.output_cost_usd,
+                                    "total_cost_usd": cost_calc.total_cost_usd,
+                                    "total_cost_krw": cost_calc.total_cost_krw,
+                                }
+                    except Exception as e:
+                        console.print(f"[dim yellow]Could not fetch actual cost: {e}[/dim yellow]")
+
+            if cost_estimate or actual_cost:
+                cost_table = Table(title="💰 Token & Cost Info", show_header=False, box=None)
+                cost_table.add_column("Key", style="cyan", width=25)
+                cost_table.add_column("Value", style="white")
+
+                if actual_cost:
+                    # Show actual values (from resume)
+                    if actual_cost.get("input_tokens"):
+                        cost_table.add_row(
+                            "📥 Input Tokens",
+                            f"[bold]{actual_cost['input_tokens']:,}[/bold]",
+                        )
+                    if actual_cost.get("output_tokens"):
+                        cost_table.add_row(
+                            "📤 Output Tokens",
+                            f"[bold]{actual_cost['output_tokens']:,}[/bold]",
+                        )
+                    if actual_cost.get("total_cost_usd"):
+                        cost_table.add_row(
+                            "💵 Total Cost (USD)",
+                            f"[bold green]${actual_cost['total_cost_usd']:.6f}[/bold green]",
+                        )
+                    if actual_cost.get("total_cost_krw"):
+                        cost_table.add_row(
+                            "💴 Total Cost (KRW)",
+                            f"[bold green]₩{actual_cost['total_cost_krw']:.2f}[/bold green]",
+                        )
+                    if cost_estimate.get("batch_discount_applied"):
+                        cost_table.add_row("🏷️  Batch Discount", "[green]50% applied[/green]")
+                elif is_completed and cost_estimate:
+                    # Completed but no actual cost - show estimated with note
+                    if cost_estimate.get("estimated_input_tokens"):
+                        cost_table.add_row(
+                            "📥 Est. Input Tokens",
+                            f"{cost_estimate['estimated_input_tokens']:,}",
+                        )
+                    if cost_estimate.get("estimated_output_tokens"):
+                        cost_table.add_row(
+                            "📤 Est. Output Tokens",
+                            f"{cost_estimate['estimated_output_tokens']:,}",
+                        )
+                    if cost_estimate.get("estimated_total_cost_usd"):
+                        cost_table.add_row(
+                            "💵 Est. Cost (USD)",
+                            f"${cost_estimate['estimated_total_cost_usd']:.6f}",
+                        )
+                    if cost_estimate.get("estimated_total_cost_krw"):
+                        cost_table.add_row(
+                            "💴 Est. Cost (KRW)",
+                            f"₩{cost_estimate['estimated_total_cost_krw']:.2f}",
+                        )
+                    if cost_estimate.get("batch_discount_applied"):
+                        cost_table.add_row("🏷️  Batch Discount", "[green]50% applied[/green]")
+                    cost_table.add_row(
+                        "",
+                        "[dim yellow]Run 'resume' to get actual cost[/dim yellow]",
+                    )
+                else:
+                    # Show estimated values for pending/running jobs
+                    if cost_estimate.get("estimated_input_tokens"):
+                        cost_table.add_row(
+                            "📥 Est. Input Tokens",
+                            f"{cost_estimate['estimated_input_tokens']:,}",
+                        )
+                    if cost_estimate.get("estimated_output_tokens"):
+                        cost_table.add_row(
+                            "📤 Est. Output Tokens",
+                            f"{cost_estimate['estimated_output_tokens']:,}",
+                        )
+                    if cost_estimate.get("estimated_total_cost_usd"):
+                        cost_table.add_row(
+                            "💵 Est. Cost (USD)",
+                            f"${cost_estimate['estimated_total_cost_usd']:.6f}",
+                        )
+                    if cost_estimate.get("estimated_total_cost_krw"):
+                        cost_table.add_row(
+                            "💴 Est. Cost (KRW)",
+                            f"₩{cost_estimate['estimated_total_cost_krw']:.2f}",
+                        )
+                    if cost_estimate.get("batch_discount_applied"):
+                        cost_table.add_row("🏷️  Batch Discount", "[green]50% applied[/green]")
+
+                console.print(cost_table)
+                console.print()
 
         # Raw attributes for debugging
         console.print("[dim]Available job attributes:[/dim]")
@@ -1915,7 +2230,7 @@ def _gemini_batch_list() -> None:
         # Sort by create_time descending (most recent first)
         jobs_sorted = sorted(
             jobs,
-            key=lambda j: j.create_time if hasattr(j, "create_time") and j.create_time else "",
+            key=lambda j: (j.create_time if hasattr(j, "create_time") and j.create_time else ""),
             reverse=True,
         )[:limit]
 
@@ -2024,26 +2339,26 @@ def gemini_batch_menu() -> None:
         padding=(0, 1),
     )
     menu_table.add_column("번호", justify="center", width=6)
-    menu_table.add_column("기능", width=16)
+    menu_table.add_column("기능", width=26)
     menu_table.add_column("설명", style="dim")
 
-    menu_table.add_row("[bold green]1[/]", "🚀 infer", "이미지 배치 추론 시작")
-    menu_table.add_row("[bold green]2[/]", "📥 resume", "배치 작업 결과 가져오기")
-    menu_table.add_row("[bold green]3[/]", "📊 status", "작업 상태 확인")
-    menu_table.add_row("[bold green]4[/]", "ℹ️  info", "상세 정보 조회")
-    menu_table.add_row("[bold green]5[/]", "📋 list", "최근 작업 목록")
-    menu_table.add_row("[bold green]6[/]", "🔧 parse", "결과 JSONL 파싱")
-    menu_table.add_row("[bold red]0[/]", "🚪 exit", "종료")
+    menu_table.add_row("[bold green]1[/]", "🚀 배치 추론 시작 (infer)", "이미지를 Gemini Batch API로 추론")
+    menu_table.add_row("[bold green]2[/]", "📥 결과 가져오기 (resume)", "완료된 배치 작업 결과 다운로드")
+    menu_table.add_row("[bold green]3[/]", "📊 상태 확인 (status)", "진행 중인 작업 상태 조회")
+    menu_table.add_row("[bold green]4[/]", "ℹ️  상세 정보 (info)", "작업의 상세 정보 조회")
+    menu_table.add_row("[bold green]5[/]", "📋 작업 목록 (list)", "최근 배치 작업 목록")
+    menu_table.add_row("[bold green]6[/]", "🔧 결과 파싱 (parse)", "JSONL 결과 파일 파싱")
+    menu_table.add_row("[bold red]0[/]", "🚪 종료 (exit)", "메뉴 종료")
 
     console.print(menu_table)
     console.print()
 
-    # Get user choice
-    choice = Prompt.ask(
-        "[bold cyan]선택[/bold cyan]",
-        choices=["0", "1", "2", "3", "4", "5", "6"],
-        default="1",
-    )
+    # Get user choice - use console.input for cleaner prompt without choices display
+    console.print("[bold cyan]번호를 입력하세요: [/bold cyan] ", end="")
+    choice = input().strip() or "1"
+    if choice not in ["0", "1", "2", "3", "4", "5", "6"]:
+        console.print(f"[red]잘못된 입력: {choice}[/red]")
+        return
 
     console.print()
 
