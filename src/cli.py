@@ -960,9 +960,10 @@ def _gemini_batch_infer() -> None:
     # Ask for GCS bucket if using Vertex AI and not provided
     if use_vertex and gcs_bucket is None:
         default_bucket = os.getenv("GCS_BUCKET_NAME", "cillian-car-wash-inspection")
-        console.print(f"[cyan]🪣 GCS bucket name[/cyan] [dim]({default_bucket})[/dim]: ", end="")
-        gcs_bucket_input = input().strip()
-        gcs_bucket = gcs_bucket_input if gcs_bucket_input else default_bucket
+        gcs_bucket = Prompt.ask(
+            "[cyan]🪣  GCS bucket name[/cyan]",
+            default=default_bucket,
+        )
 
     # Display configuration
     config_table = Table(title="⚙️  Configuration", show_header=False, box=None)
@@ -1360,9 +1361,22 @@ def _gemini_batch_resume() -> None:
     from src.inference.gemini_batch import (
         BatchTimingInfo,
         create_csv_row_from_result,
+        parse_batch_metadata_only,
         parse_batch_results,
         poll_batch_job,
     )
+
+    # Ask for parse mode
+    console.print("[bold cyan]파싱 모드 선택:[/bold cyan]")
+    console.print("  [dim]1. metadata - 토큰/비용 정보만 파싱 (빠름, done.json만 생성)[/dim]")
+    console.print("  [dim]2. streaming - 전체 결과 파싱, 스트리밍 (메모리 효율적)[/dim]")
+    console.print("  [dim]3. download - 전체 결과 파싱, 다운로드 후 파싱[/dim]")
+    parse_mode = Prompt.ask(
+        "[cyan]파싱 모드[/cyan]",
+        choices=["metadata", "streaming", "download"],
+        default="metadata",
+    )
+    console.print()
 
     try:
         # Check job status first
@@ -1384,18 +1398,28 @@ def _gemini_batch_resume() -> None:
             final_job = job
             _ = BatchTimingInfo()  # Placeholder for future timing info usage
 
-        # Parse results
-        console.print("[cyan]Parsing batch results...[/cyan]")
-        results, cost_info = parse_batch_results(client, final_job, request_keys, use_vertex_ai=use_vertex)
-
-        # Count results
-        successful = sum(1 for r in results.values() if r.get("success"))
-        failed = len(results) - successful
+        # Parse based on mode
+        results: dict = {}
+        if parse_mode == "metadata":
+            # Metadata only mode - just get tokens/cost
+            console.print("[cyan]Parsing metadata only...[/cyan]")
+            cost_info, result_counts = parse_batch_metadata_only(final_job, use_vertex_ai=use_vertex)
+            successful = result_counts["successful"]
+            failed = result_counts["failed"]
+        else:
+            # Full parse mode
+            console.print("[cyan]Parsing batch results...[/cyan]")
+            use_streaming = parse_mode == "streaming"
+            results, cost_info = parse_batch_results(
+                client, final_job, request_keys, use_vertex_ai=use_vertex, use_streaming=use_streaming
+            )
+            successful = sum(1 for r in results.values() if r.get("success"))
+            failed = len(results) - successful
 
         console.print()
         console.print("[green]✅ Results parsed[/green]")
-        console.print(f"[green]   Successful: {successful}[/green]")
-        console.print(f"[red]   Failed: {failed}[/red]")
+        console.print(f"[green]   Successful: {successful:,}[/green]")
+        console.print(f"[red]   Failed: {failed:,}[/red]")
 
         # Display cost info
         if cost_info.input_tokens > 0 or cost_info.output_tokens > 0:
@@ -1417,7 +1441,7 @@ def _gemini_batch_resume() -> None:
         job_info["result_count"] = {
             "successful": successful,
             "failed": failed,
-            "total": len(results),
+            "total": successful + failed,
         }
 
         # Always save done.json
@@ -1440,13 +1464,18 @@ def _gemini_batch_resume() -> None:
                 json.dump(job_info, f, indent=2, ensure_ascii=False)
             console.print(f"[dim]Job info saved to: {done_file}[/dim]")
 
-        # Ask if user wants to generate CSV
-        console.print()
-        generate_csv = Prompt.ask(
-            "[cyan]📄 결과 CSV 파일을 생성하시겠습니까?[/cyan]",
-            choices=["y", "n"],
-            default="n",
-        )
+        # Ask if user wants to generate CSV (only if full parse was done)
+        if parse_mode == "metadata":
+            console.print()
+            console.print("[dim]CSV 생성을 원하시면 streaming 또는 download 모드로 다시 실행하세요.[/dim]")
+            generate_csv = "n"
+        else:
+            console.print()
+            generate_csv = Prompt.ask(
+                "[cyan]📄 결과 CSV 파일을 생성하시겠습니까?[/cyan]",
+                choices=["y", "n"],
+                default="n",
+            )
 
         if generate_csv.lower() == "y":
             import csv

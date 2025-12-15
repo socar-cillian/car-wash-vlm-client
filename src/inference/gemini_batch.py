@@ -18,7 +18,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlparse
 
 
@@ -216,12 +216,13 @@ def delete_gcs_blob(gcs_uri: str) -> None:
     blob.delete()
 
 
-def list_gcs_images(gcs_path: str) -> list[str]:
+def list_gcs_images(gcs_path: str, show_progress: bool = True) -> list[str]:
     """
     List image files in a GCS path.
 
     Args:
         gcs_path: GCS path (gs://bucket/path or bucket/path)
+        show_progress: Whether to show progress bar
 
     Returns:
         List of GCS URIs for image files
@@ -245,10 +246,27 @@ def list_gcs_images(gcs_path: str) -> list[str]:
     image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
     image_uris = []
 
-    for blob in blobs:
-        ext = Path(blob.name).suffix.lower()
-        if ext in image_extensions:
-            image_uris.append(f"gs://{bucket_name}/{blob.name}")
+    if show_progress:
+        from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[cyan]Scanning GCS images...[/cyan]"),
+            TextColumn("[green]{task.fields[count]:,}[/green] images found"),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Scanning", count=0)
+            for blob in blobs:
+                ext = Path(blob.name).suffix.lower()
+                if ext in image_extensions:
+                    image_uris.append(f"gs://{bucket_name}/{blob.name}")
+                    progress.update(task, count=len(image_uris))
+    else:
+        for blob in blobs:
+            ext = Path(blob.name).suffix.lower()
+            if ext in image_extensions:
+                image_uris.append(f"gs://{bucket_name}/{blob.name}")
 
     return image_uris
 
@@ -1045,11 +1063,296 @@ def poll_batch_job(
     return job, timing
 
 
+def parse_batch_metadata_only(
+    job: Any,
+    use_vertex_ai: bool = True,
+) -> tuple[CostInfo, dict[str, int]]:
+    """
+    Parse only metadata (tokens, cost) from batch job results without full content parsing.
+    Uses streaming to minimize memory usage.
+
+    Args:
+        job: Completed batch job object
+        use_vertex_ai: Whether using Vertex AI (affects pricing)
+
+    Returns:
+        Tuple of (cost info, result counts dict with 'successful', 'failed', 'total')
+    """
+    cost_info = CostInfo(
+        model=str(job.model) if hasattr(job, "model") else "unknown",
+        use_vertex_ai=use_vertex_ai,
+    )
+    result_counts = {"successful": 0, "failed": 0, "total": 0}
+
+    if not (hasattr(job, "dest") and job.dest):
+        return cost_info, result_counts
+
+    dest = job.dest
+    gcs_output_uri = None
+    if hasattr(dest, "gcs_uri") and dest.gcs_uri:
+        gcs_output_uri = dest.gcs_uri
+    elif hasattr(dest, "output_uri_prefix") and dest.output_uri_prefix:
+        gcs_output_uri = dest.output_uri_prefix
+
+    if not gcs_output_uri:
+        return cost_info, result_counts
+
+    console.print(f"[cyan]Streaming metadata from GCS: {gcs_output_uri}[/cyan]")
+
+    storage_client = _get_storage_client()
+    gcs_path = gcs_output_uri[5:] if gcs_output_uri.startswith("gs://") else gcs_output_uri
+    parts = gcs_path.split("/", 1)
+    bucket_name = parts[0]
+    prefix = parts[1] if len(parts) > 1 else ""
+    if prefix and not prefix.endswith("/"):
+        prefix += "/"
+
+    bucket = storage_client.bucket(bucket_name)
+    blobs = list(bucket.list_blobs(prefix=prefix))
+    jsonl_blobs = [b for b in blobs if b.name.endswith(".jsonl")]
+
+    if not jsonl_blobs:
+        console.print("[yellow]Warning: No JSONL files found[/yellow]")
+        return cost_info, result_counts
+
+    console.print(f"[green]Found {len(jsonl_blobs)} JSONL file(s)[/green]")
+
+    for blob in jsonl_blobs:
+        blob_size_mb = blob.size / (1024 * 1024) if blob.size else 0
+        console.print(f"[dim]Streaming: gs://{bucket_name}/{blob.name} ({blob_size_mb:.1f} MB)[/dim]")
+
+        # Stream line by line from GCS
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TextColumn("•"),
+            TextColumn("[cyan]{task.completed:,}[/cyan] records"),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            # Use blob size as approximate progress (bytes processed)
+            task = progress.add_task("[cyan]Parsing metadata...", total=blob.size or 100)
+
+            bytes_processed = 0
+            with blob.open("r") as f:
+                for line in f:
+                    line_str = line.strip()
+                    if not line_str:
+                        continue
+
+                    bytes_processed += len(line.encode("utf-8"))
+                    result_counts["total"] += 1
+
+                    try:
+                        record = json.loads(line_str)
+                        response = record.get("response", {})
+
+                        if response:
+                            usage = response.get("usageMetadata", {})
+                            cost_info.input_tokens += usage.get("promptTokenCount", 0) or 0
+                            cost_info.output_tokens += usage.get("candidatesTokenCount", 0) or 0
+
+                            # Check if successful
+                            candidates = response.get("candidates", [])
+                            if candidates:
+                                result_counts["successful"] += 1
+                            else:
+                                result_counts["failed"] += 1
+                        elif "error" in record:
+                            result_counts["failed"] += 1
+                        else:
+                            result_counts["failed"] += 1
+
+                    except json.JSONDecodeError:
+                        result_counts["failed"] += 1
+
+                    progress.update(task, completed=bytes_processed)
+
+        console.print(f"[dim]  Processed {result_counts['total']:,} records[/dim]")
+
+    return cost_info, result_counts
+
+
+def _parse_blob_streaming(
+    blob: Any,
+    results: dict[str, dict[str, Any]],
+    cost_info: CostInfo,
+) -> tuple[dict[str, dict[str, Any]], CostInfo]:
+    """Parse a blob using streaming (memory efficient)."""
+    blob_size = blob.size or 0
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TextColumn("•"),
+        TextColumn("[cyan]{task.completed:,}[/cyan] records"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("[cyan]Streaming & parsing...", total=blob_size)
+
+        bytes_processed = 0
+        record_count = 0
+
+        with blob.open("r") as f:
+            for line in f:
+                line_str = line.strip()
+                if not line_str:
+                    continue
+
+                bytes_processed += len(line.encode("utf-8"))
+                record_count += 1
+
+                try:
+                    record = json.loads(line_str)
+                    key = record.get("key", "")
+                    if not key:
+                        request = record.get("request", {})
+                        key = request.get("key", f"request_{len(results)}")
+
+                    result_data: dict[str, Any] = {
+                        "success": False,
+                        "result": None,
+                        "error": None,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                    }
+
+                    response = record.get("response", {})
+                    if response:
+                        candidates = response.get("candidates", [])
+                        if candidates:
+                            candidate = candidates[0]
+                            content_obj = candidate.get("content", {})
+                            parts = content_obj.get("parts", [])
+                            if parts:
+                                text = parts[0].get("text", "")
+                                if text:
+                                    try:
+                                        result_data["result"] = json.loads(text)
+                                        result_data["success"] = True
+                                    except json.JSONDecodeError:
+                                        result_data["result"] = {"raw_text": text}
+                                        result_data["success"] = True
+
+                        usage = response.get("usageMetadata", {})
+                        result_data["input_tokens"] = usage.get("promptTokenCount", 0) or 0
+                        result_data["output_tokens"] = usage.get("candidatesTokenCount", 0) or 0
+                        cost_info.input_tokens += result_data["input_tokens"]
+                        cost_info.output_tokens += result_data["output_tokens"]
+
+                    if "error" in record:
+                        result_data["error"] = str(record["error"])
+                        result_data["success"] = False
+
+                    results[key] = result_data
+
+                except json.JSONDecodeError:
+                    pass
+
+                progress.update(task, completed=bytes_processed)
+
+    console.print(f"[dim]  Parsed {record_count:,} records (streaming)[/dim]")
+    return results, cost_info
+
+
+def _parse_blob_download(
+    blob: Any,
+    results: dict[str, dict[str, Any]],
+    cost_info: CostInfo,
+) -> tuple[dict[str, dict[str, Any]], CostInfo]:
+    """Parse a blob by downloading entirely first."""
+    import io
+
+    blob_size_mb = blob.size / (1024 * 1024) if blob.size else 0
+
+    # Download with status indicator
+    with console.status(f"[cyan]Downloading JSONL ({blob_size_mb:.1f} MB)...[/cyan]"):
+        blob_bytes = blob.download_as_bytes()
+
+    # Count total lines first for progress bar
+    lines = [line for line in io.BytesIO(blob_bytes) if line.decode("utf-8").strip()]
+    total_lines = len(lines)
+    console.print(f"[dim]Found {total_lines:,} records to parse[/dim]")
+
+    # Parse with progress bar
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("[cyan]Parsing results...", total=total_lines)
+
+        for line in lines:
+            line_str = line.decode("utf-8").strip()
+
+            try:
+                record = json.loads(line_str)
+                key = record.get("key", "")
+                if not key:
+                    request = record.get("request", {})
+                    key = request.get("key", f"request_{len(results)}")
+
+                result_data: dict[str, Any] = {
+                    "success": False,
+                    "result": None,
+                    "error": None,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                }
+
+                response = record.get("response", {})
+                if response:
+                    candidates = response.get("candidates", [])
+                    if candidates:
+                        candidate = candidates[0]
+                        content_obj = candidate.get("content", {})
+                        parts = content_obj.get("parts", [])
+                        if parts:
+                            text = parts[0].get("text", "")
+                            if text:
+                                try:
+                                    result_data["result"] = json.loads(text)
+                                    result_data["success"] = True
+                                except json.JSONDecodeError:
+                                    result_data["result"] = {"raw_text": text}
+                                    result_data["success"] = True
+
+                    usage = response.get("usageMetadata", {})
+                    result_data["input_tokens"] = usage.get("promptTokenCount", 0) or 0
+                    result_data["output_tokens"] = usage.get("candidatesTokenCount", 0) or 0
+                    cost_info.input_tokens += result_data["input_tokens"]
+                    cost_info.output_tokens += result_data["output_tokens"]
+
+                if "error" in record:
+                    result_data["error"] = str(record["error"])
+                    result_data["success"] = False
+
+                results[key] = result_data
+
+            except json.JSONDecodeError as e:
+                console.print(f"[yellow]Warning: Failed to parse JSONL line: {e}[/yellow]")
+
+            progress.advance(task)
+
+    console.print(f"[dim]  Parsed {total_lines:,} records (downloaded)[/dim]")
+    return results, cost_info
+
+
 def parse_batch_results(
     client: genai.Client,
     job: Any,
     request_keys: list[str],
     use_vertex_ai: bool = True,
+    use_streaming: bool = False,
 ) -> tuple[dict[str, dict[str, Any]], CostInfo]:
     """
     Parse batch job results.
@@ -1059,6 +1362,7 @@ def parse_batch_results(
         job: Completed batch job object
         request_keys: List of request keys to match (used for inline requests without keys)
         use_vertex_ai: Whether using Vertex AI (affects pricing)
+        use_streaming: If True, stream from GCS instead of downloading entire file
 
     Returns:
         Tuple of (results dict mapping key to result, cost info)
@@ -1082,8 +1386,8 @@ def parse_batch_results(
             gcs_output_uri = dest.output_uri_prefix
 
         if gcs_output_uri:
-            # Vertex AI mode: download and parse JSONL from GCS
-            console.print(f"[cyan]Downloading results from GCS: {gcs_output_uri}[/cyan]")
+            # Vertex AI mode: parse JSONL from GCS
+            console.print(f"[cyan]Reading results from GCS: {gcs_output_uri}[/cyan]")
 
             # List all JSONL files in the output directory
             storage_client = _get_storage_client()
@@ -1114,90 +1418,15 @@ def parse_batch_results(
                 console.print(f"[green]Found {len(jsonl_blobs)} JSONL file(s)[/green]")
 
                 for blob in jsonl_blobs:
-                    console.print(f"[dim]Processing: gs://{bucket_name}/{blob.name}[/dim]")
+                    blob_size_mb = blob.size / (1024 * 1024) if blob.size else 0
+                    console.print(f"[dim]Processing: gs://{bucket_name}/{blob.name} ({blob_size_mb:.1f} MB)[/dim]")
 
-                    # Stream download and parse JSONL content line by line
-                    # This is memory-efficient for large files
-                    import io
-
-                    # Download to a bytes buffer and read line by line
-                    blob_bytes = blob.download_as_bytes()
-
-                    # Count total lines first for progress bar
-                    lines = [line for line in io.BytesIO(blob_bytes) if line.decode("utf-8").strip()]
-                    total_lines = len(lines)
-
-                    # Parse with progress bar
-                    with Progress(
-                        SpinnerColumn(),
-                        TextColumn("[progress.description]{task.description}"),
-                        BarColumn(),
-                        MofNCompleteColumn(),
-                        TaskProgressColumn(),
-                        TimeElapsedColumn(),
-                        console=console,
-                    ) as progress:
-                        task = progress.add_task("[cyan]Parsing results...", total=total_lines)
-
-                        for line in lines:
-                            line_str = line.decode("utf-8").strip()
-
-                            try:
-                                record = json.loads(line_str)
-
-                                # Extract key from record
-                                key = record.get("key", "")
-                                if not key:
-                                    # Try to find key in request
-                                    request = record.get("request", {})
-                                    key = request.get("key", f"request_{len(results)}")
-
-                                result_data: dict[str, Any] = {
-                                    "success": False,
-                                    "result": None,
-                                    "error": None,
-                                    "input_tokens": 0,
-                                    "output_tokens": 0,
-                                }
-
-                                # Parse response
-                                response = record.get("response", {})
-                                if response:
-                                    candidates = response.get("candidates", [])
-                                    if candidates:
-                                        candidate = candidates[0]
-                                        content_obj = candidate.get("content", {})
-                                        parts = content_obj.get("parts", [])
-                                        if parts:
-                                            text = parts[0].get("text", "")
-                                            if text:
-                                                try:
-                                                    result_data["result"] = json.loads(text)
-                                                    result_data["success"] = True
-                                                except json.JSONDecodeError:
-                                                    result_data["result"] = {"raw_text": text}
-                                                    result_data["success"] = True
-
-                                    # Extract usage metadata
-                                    usage = response.get("usageMetadata", {})
-                                    result_data["input_tokens"] = usage.get("promptTokenCount", 0) or 0
-                                    result_data["output_tokens"] = usage.get("candidatesTokenCount", 0) or 0
-                                    cost_info.input_tokens += result_data["input_tokens"]
-                                    cost_info.output_tokens += result_data["output_tokens"]
-
-                                # Check for error
-                                if "error" in record:
-                                    result_data["error"] = str(record["error"])
-                                    result_data["success"] = False
-
-                                results[key] = result_data
-
-                            except json.JSONDecodeError as e:
-                                console.print(f"[yellow]Warning: Failed to parse JSONL line: {e}[/yellow]")
-
-                            progress.advance(task)
-
-                    console.print(f"[dim]  Parsed {total_lines} records[/dim]")
+                    if use_streaming:
+                        # Streaming mode: read line by line from GCS
+                        results, cost_info = _parse_blob_streaming(blob, results, cost_info)
+                    else:
+                        # Download mode: download entire file then parse
+                        results, cost_info = _parse_blob_download(blob, results, cost_info)
 
         elif hasattr(dest, "inlined_responses") and dest.inlined_responses:
             # For inline requests, responses may not have keys
@@ -1212,7 +1441,7 @@ def parse_batch_results(
                 else:
                     key = f"request_{idx}"
 
-                result_data = {
+                result_data: dict[str, Any] = {
                     "success": False,
                     "result": None,
                     "error": None,
@@ -1240,10 +1469,12 @@ def parse_batch_results(
                     # Extract usage metadata
                     if hasattr(resp, "usage_metadata") and resp.usage_metadata:
                         usage = resp.usage_metadata
-                        result_data["input_tokens"] = getattr(usage, "prompt_token_count", 0) or 0
-                        result_data["output_tokens"] = getattr(usage, "candidates_token_count", 0) or 0
-                        cost_info.input_tokens += result_data["input_tokens"]
-                        cost_info.output_tokens += result_data["output_tokens"]
+                        input_tok: int = getattr(usage, "prompt_token_count", 0) or 0
+                        output_tok: int = getattr(usage, "candidates_token_count", 0) or 0
+                        result_data["input_tokens"] = input_tok
+                        result_data["output_tokens"] = output_tok
+                        cost_info.input_tokens += input_tok
+                        cost_info.output_tokens += output_tok
 
                 if hasattr(response, "error") and response.error:
                     result_data["error"] = str(response.error)
@@ -1605,9 +1836,9 @@ def run_gemini_batch_inference(
     console.print(f"[dim]Estimated output tokens per image: {estimated_output_tokens} (based on prompt analysis)[/dim]")
 
     if use_gcs_images:
-        # For GCS images, use simple estimation (can't sample without downloading)
-        console.print("[bold yellow]━━━ Estimated Cost (Simple Estimation) ━━━[/bold yellow]")
-        from src.inference.pricing import estimate_batch_cost
+        # For GCS images, sample a few images to estimate token count using file_uri
+        console.print("[bold yellow]━━━ Estimated Cost (API Token Counting with GCS) ━━━[/bold yellow]")
+        from src.inference.pricing import CostInfo
 
         # Get prompt token count
         try:
@@ -1619,14 +1850,91 @@ def run_gemini_batch_inference(
         except Exception:
             prompt_tokens = len(prompt) // 4
 
-        cost_estimate = estimate_batch_cost(
-            num_images=num_images,
+        # Sample GCS images to estimate image token count
+        sample_size = min(10, len(gcs_image_uris))
+        sample_uris = gcs_image_uris[:sample_size]
+        image_token_samples: list[int] = []
+
+        console.print(f"[dim]Sampling {sample_size} GCS images for token estimation...[/dim]")
+
+        for uri in sample_uris:
+            try:
+                # Determine mime type from extension
+                ext = Path(uri).suffix.lower()
+                mime_types = {
+                    ".jpg": "image/jpeg",
+                    ".jpeg": "image/jpeg",
+                    ".png": "image/png",
+                    ".gif": "image/gif",
+                    ".webp": "image/webp",
+                    ".bmp": "image/bmp",
+                }
+                mime_type = mime_types.get(ext, "image/jpeg")
+
+                # Build content with file_uri
+                contents = [
+                    types.Content(
+                        parts=[
+                            types.Part.from_uri(file_uri=uri, mime_type=mime_type),
+                            types.Part.from_text(text=prompt),
+                        ]
+                    )
+                ]
+
+                response = client.models.count_tokens(model=model, contents=contents)
+                if hasattr(response, "total_tokens") and response.total_tokens:
+                    total_tokens = int(response.total_tokens)
+                    # Subtract prompt tokens to get image tokens
+                    image_tokens = total_tokens - prompt_tokens
+                    if image_tokens > 0:
+                        image_token_samples.append(image_tokens)
+            except Exception as e:
+                console.print(f"[dim]Warning: Failed to count tokens for {Path(uri).name}: {e}[/dim]")
+                continue
+
+        # Calculate average image tokens
+        if image_token_samples:
+            avg_image_tokens = sum(image_token_samples) // len(image_token_samples)
+            sample_count = len(image_token_samples)
+            console.print(f"[dim]Sampled {sample_count} images, avg tokens: {avg_image_tokens:,}[/dim]")
+        else:
+            # Fallback to default
+            avg_image_tokens = 258
+            console.print("[dim]Using default image token estimate (258)[/dim]")
+
+        # Calculate total tokens
+        tokens_per_request = prompt_tokens + avg_image_tokens
+        total_input_tokens = tokens_per_request * num_images
+        total_output_tokens = estimated_output_tokens * num_images
+
+        # Calculate costs
+        cost_info = CostInfo(
+            input_tokens=total_input_tokens,
+            output_tokens=total_output_tokens,
             model=model,
-            prompt_tokens=prompt_tokens,
-            output_tokens_per_image=estimated_output_tokens,
+            is_batch=True,
             use_vertex_ai=use_vertex,
         )
-        cost_estimate["sampled_images"] = 0
+        cost_info.calculate_costs()
+
+        cost_estimate = {
+            "num_images": num_images,
+            "estimated_input_tokens": total_input_tokens,
+            "estimated_output_tokens": total_output_tokens,
+            "estimated_total_tokens": total_input_tokens + total_output_tokens,
+            "tokens_per_request": tokens_per_request,
+            "prompt_tokens": prompt_tokens,
+            "avg_image_tokens": avg_image_tokens,
+            "output_tokens_per_image": estimated_output_tokens,
+            "estimated_input_cost_usd": cost_info.input_cost_usd,
+            "estimated_output_cost_usd": cost_info.output_cost_usd,
+            "estimated_total_cost_usd": cost_info.total_cost_usd,
+            "estimated_total_cost_krw": cost_info.total_cost_krw,
+            "model": model,
+            "use_vertex_ai": use_vertex,
+            "batch_discount_applied": True,
+            "sampled_images": len(image_token_samples),
+        }
     else:
         # For local images, use API-based token counting with sampling
         console.print("[bold yellow]━━━ Estimated Cost (API Token Counting) ━━━[/bold yellow]")
@@ -1637,7 +1945,7 @@ def run_gemini_batch_inference(
             image_paths=valid_image_paths,
             output_tokens_per_image=estimated_output_tokens,
             use_vertex_ai=use_vertex,
-            sample_size=5,
+            sample_size=10,
         )
 
     estimate_table = Table(show_header=False, box=None)
@@ -1646,7 +1954,8 @@ def run_gemini_batch_inference(
 
     estimate_table.add_row("📷 Images to process", str(cost_estimate["num_images"]))
     estimate_table.add_row("📝 Prompt tokens", f"{cost_estimate['prompt_tokens']:,}")
-    estimate_table.add_row("🖼️  Avg image tokens", f"{cost_estimate['avg_image_tokens']:,}")
+    avg_img_tokens = cost_estimate.get("avg_image_tokens", cost_estimate.get("image_tokens", 258))
+    estimate_table.add_row("🖼️  Avg image tokens", f"{avg_img_tokens:,}")
     estimate_table.add_row("📥 Tokens per request", f"{cost_estimate['tokens_per_request']:,}")
     estimate_table.add_row("📤 Output tokens/image", f"~{cost_estimate['output_tokens_per_image']:,}")
     estimate_table.add_row("", "")
@@ -1954,18 +2263,18 @@ def run_gemini_batch_inference(
     # Compare with estimate
     actual_cost_table.add_row("", "")
     actual_cost_table.add_row("[bold]━━━ Comparison with Estimate ━━━[/bold]", "")
-    estimated_input = cost_estimate["estimated_input_tokens"]
-    estimated_output = cost_estimate["estimated_output_tokens"]
-    actual_input = cost_info.input_tokens
-    actual_output = cost_info.output_tokens
+    estimated_input: int = cast(int, cost_estimate["estimated_input_tokens"])
+    estimated_output: int = cast(int, cost_estimate["estimated_output_tokens"])
+    estimated_cost_usd: float = cast(float, cost_estimate["estimated_total_cost_usd"])
+    actual_input: int = cost_info.input_tokens
+    actual_output: int = cost_info.output_tokens
 
-    input_diff = actual_input - estimated_input
-    output_diff = actual_output - estimated_output
-    cost_diff = cost_info.total_cost_usd - cost_estimate["estimated_total_cost_usd"]
+    input_diff: int = actual_input - estimated_input
+    output_diff: int = actual_output - estimated_output
+    cost_diff: float = cost_info.total_cost_usd - estimated_cost_usd
 
     input_diff_pct = (input_diff / estimated_input * 100) if estimated_input > 0 else 0
     output_diff_pct = (output_diff / estimated_output * 100) if estimated_output > 0 else 0
-    estimated_cost_usd = cost_estimate["estimated_total_cost_usd"]
     cost_diff_pct = (cost_diff / estimated_cost_usd * 100) if estimated_cost_usd > 0 else 0
 
     input_diff_str = f"+{input_diff:,}" if input_diff >= 0 else f"{input_diff:,}"
