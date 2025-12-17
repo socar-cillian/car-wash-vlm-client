@@ -63,20 +63,20 @@ app = typer.Typer(
 )
 
 
-def _get_api_url(internal: bool, model: str, namespace: str = "vllm-test") -> str:
+def _get_api_url(internal: bool, model: str, namespace: str = "vllm") -> str:
     """
     Get the appropriate API URL based on whether running internally or externally.
 
     Args:
         internal: Whether running inside Kubernetes cluster
         model: Model name to determine the service
-        namespace: Kubernetes namespace (vllm or vllm-test)
+        namespace: Kubernetes namespace (vllm)
 
     Returns:
         Full API URL for the VLM service
     """
     # Service name pattern: <release>-<model>-engine-service
-    # Release name matches namespace (vllm or vllm-test)
+    # Release name matches namespace (vllm)
     # Model name: qwen3-vl-8b
     service_name = f"{namespace}-qwen3-vl-8b-engine-service"
 
@@ -84,8 +84,8 @@ def _get_api_url(internal: bool, model: str, namespace: str = "vllm-test") -> st
         # Internal K8s URL
         return f"http://{service_name}.{namespace}.svc.cluster.local:8000/v1/chat/completions"
     else:
-        # External URL - model name is used as subdomain (from ingress-engine.yaml)
-        return "https://qwen3-vl-8b.mlops.socarcorp.co.kr/v1/chat/completions"
+        # External URL
+        return "https://vllm.ai.mlops.socarcorp.co.kr/v1/chat/completions"
 
 
 @app.command("infer")
@@ -122,7 +122,7 @@ def single_inference(
 
     # Determine API URL
     if api_url is None:
-        api_url = _get_api_url(internal, model, "vllm-test")
+        api_url = _get_api_url(internal, model, "vllm")
 
     # Initialize client
     typer.echo(f"API URL: {api_url}")
@@ -270,16 +270,9 @@ def _batch_infer_csv_mode() -> None:
             limit = None
 
     # Ask for internal mode
-    namespace = "vllm-test"  # default
+    namespace = "vllm"  # default
     internal_str = Prompt.ask("[cyan]🔧 Running inside Kubernetes cluster? (y/N)[/cyan]", default="N")
     internal = internal_str.strip().lower() in ["y", "yes"]
-
-    # Ask for namespace
-    namespace = Prompt.ask(
-        "[cyan]🏷️  Select namespace (vllm / vllm-test)[/cyan]",
-        choices=["vllm", "vllm-test"],
-        default="vllm-test",
-    )
 
     console.print()
 
@@ -362,8 +355,8 @@ def _batch_infer_csv_mode() -> None:
     model_info = temp_client.get_model_info()
     server_max_model_len = model_info.get("max_model_len") if model_info else None
 
-    # Set workers - default 12 for prefix caching optimization
-    max_workers = 12  # Optimized for prefix caching with A100 40GB
+    # Set workers - default 24 for prefix caching optimization
+    max_workers = 24  # Optimized for prefix caching with A100 40GB
     console.print(f"[cyan]ℹ️  Using {max_workers} workers (prefix caching enabled)[/cyan]")
     console.print()
     logger.info(f"Using {max_workers} workers")
@@ -548,7 +541,7 @@ def _batch_infer_folder_mode() -> None:
     max_tokens = 1000
     temperature = 0.0
     limit: int | None = None
-    max_workers = 12
+    max_workers = 24
     api_url: str | None = None
     internal = False
 
@@ -572,16 +565,9 @@ def _batch_infer_folder_mode() -> None:
             limit = None
 
     # Ask for internal mode
-    namespace = "vllm-test"  # default
+    namespace = "vllm"  # default
     internal_str = Prompt.ask("[cyan]🔧 Running inside Kubernetes cluster? (y/N)[/cyan]", default="N")
     internal = internal_str.strip().lower() in ["y", "yes"]
-
-    # Ask for namespace
-    namespace = Prompt.ask(
-        "[cyan]🏷️  Select namespace (vllm / vllm-test)[/cyan]",
-        choices=["vllm", "vllm-test"],
-        default="vllm-test",
-    )
 
     console.print()
 

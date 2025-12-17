@@ -132,7 +132,7 @@ class VLMClient:
         except Exception:
             return None
 
-    def get_server_replicas(self, namespace: str = "vllm-test", timeout: int = 5) -> int:
+    def get_server_replicas(self, namespace: str = "vllm", timeout: int = 5) -> int:
         """
         Get the number of available server replicas by querying Kubernetes endpoints.
 
@@ -188,9 +188,7 @@ class VLMClient:
         health = self.check_health(timeout=timeout)
         return 1 if health.get("healthy") else 0
 
-    def get_recommended_workers(
-        self, namespace: str = "vllm-test", workers_per_replica: int = 4, timeout: int = 5
-    ) -> int:
+    def get_recommended_workers(self, namespace: str = "vllm", workers_per_replica: int = 4, timeout: int = 5) -> int:
         """
         Get the recommended number of workers based on server replicas.
 
