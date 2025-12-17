@@ -7,13 +7,12 @@ from pathlib import Path
 from langchain_core.prompts import PromptTemplate
 
 
-# Severity labels (Level 0 ~ Level 4)
+# Severity labels (Level 0 ~ Level 3)
 SEVERITY_LABELS = [
     "Level 0",
     "Level 1",
     "Level 2",
     "Level 3",
-    "Level 4",
 ]
 
 # Area type mapping (구분 column)
@@ -239,14 +238,20 @@ def _create_prompt_template() -> PromptTemplate:
       "area_name": "<검수 부위 (위 테이블 참조)>",
       "contaminations": [
         {{
-          "contamination_type": "<오염 항목 (가이드라인 참조)>",
-          "severity": "<유효한 레벨만 사용>"
+          "contamination_type": "<오염 항목 또는 null>",
+          "severity": "<Level 0, Level 1, Level 2, Level 3 중 하나>"
         }}
       ]
     }}
   ]
 }}
 ```
+
+## Level 0 (깨끗한 상태) 처리 규칙
+
+**핵심**: Level 0은 "오염 없음"을 의미하므로 contamination_type을 null로 표시합니다.
+- 해당 부위에 오염이 없으면: `"contamination_type": null`, `"severity": "Level 0"`
+- 해당 부위에 오염이 있으면: `"contamination_type": "<오염 항목>"`, `"severity": "Level 1~3"`
 
 # 평가 규칙
 
@@ -267,17 +272,18 @@ def _create_prompt_template() -> PromptTemplate:
 - 내부 오염: {interior_contaminations_list}
 - **가이드라인에 없는 오염은 무시** - 예측하지 않음
 
-## 4. 심각도 레벨 제한 (핵심 규칙)
-- **각 오염 항목별로 정의된 레벨만 사용 가능**
+## 4. 심각도 레벨 규칙 (핵심)
+- **Level 0 (깨끗함)**: `"contamination_type": null`, `"severity": "Level 0"` 으로 표시
+- **Level 1~3 (오염됨)**: `"contamination_type": "<오염 항목>"`, `"severity": "Level 1~3"` 으로 표시
 - **'-'로 표시된 레벨은 존재하지 않으므로 절대 사용 금지**
-- 예: "새 배설물"은 Level 1이 없으므로 Level 0, 2, 3, 4만 사용 가능
-- 예: "스티커"는 Level 1이 없으므로 Level 0, 2, 3, 4만 사용 가능
-- 예: "낙엽"은 Level 4가 없으므로 Level 0, 1, 2, 3만 사용 가능
+- 예: "새 배설물"은 Level 1이 없으므로 Level 2, 3만 사용 가능
+- 예: "구토"는 Level 1이 없으므로 Level 2, 3만 사용 가능
 
 ## 5. 중요 금지 사항
 - **가이드라인에 없는 검수 부위 예측 금지**
 - **가이드라인에 없는 오염 항목 예측 금지**
 - **정의되지 않은 레벨(-)로 예측 금지**
+- **Level 0일 때 contamination_type에 오염 항목 사용 금지** - 반드시 null로 표시
 - 유효한 JSON만 출력 - 추가 텍스트나 설명 없음
 
 # 출력 예시
@@ -310,7 +316,7 @@ def _create_prompt_template() -> PromptTemplate:
 ```
 ※ 새 배설물은 Level 1이 없으므로 Level 2 사용
 
-**예시 3: 외부 - 여러 부위 평가**
+**예시 3: 외부 - 여러 부위 평가 (오염된 부위와 깨끗한 부위 혼합)**
 ```json
 {{
   "image_type": "외부",
@@ -321,10 +327,6 @@ def _create_prompt_template() -> PromptTemplate:
         {{
           "contamination_type": "진흙 및 흙탕물",
           "severity": "Level 2"
-        }},
-        {{
-          "contamination_type": "나무 수액",
-          "severity": "Level 0"
         }}
       ]
     }},
@@ -332,7 +334,7 @@ def _create_prompt_template() -> PromptTemplate:
       "area_name": "유리",
       "contaminations": [
         {{
-          "contamination_type": "스티커",
+          "contamination_type": null,
           "severity": "Level 0"
         }}
       ]
@@ -349,8 +351,9 @@ def _create_prompt_template() -> PromptTemplate:
   ]
 }}
 ```
+※ 유리는 오염이 없어 contamination_type: null, severity: "Level 0" 으로 표시
 
-**예시 4: 내부 - 시트 오염**
+**예시 4: 내부 - 시트와 바닥재 오염**
 ```json
 {{
   "image_type": "내부",
@@ -369,7 +372,7 @@ def _create_prompt_template() -> PromptTemplate:
       ]
     }},
     {{
-      "area_name": "매트",
+      "area_name": "바닥재",
       "contaminations": [
         {{
           "contamination_type": "모래 및 흙",
@@ -400,20 +403,25 @@ def _create_prompt_template() -> PromptTemplate:
 ```
 ※ 분실물은 Level 1이 없으므로 Level 2부터 사용
 
-**예시 6: 깨끗한 상태**
+**예시 6: 깨끗한 상태 (오염 없음)**
 ```json
 {{
-  "image_type": "외부",
+  "image_type": "내부",
   "areas": [
     {{
-      "area_name": "본넷",
+      "area_name": "시트",
       "contaminations": [
         {{
-          "contamination_type": "새 배설물",
+          "contamination_type": null,
           "severity": "Level 0"
-        }},
+        }}
+      ]
+    }},
+    {{
+      "area_name": "바닥재",
+      "contaminations": [
         {{
-          "contamination_type": "진흙 및 흙탕물",
+          "contamination_type": null,
           "severity": "Level 0"
         }}
       ]
@@ -421,6 +429,7 @@ def _create_prompt_template() -> PromptTemplate:
   ]
 }}
 ```
+※ 오염이 없는 부위는 contamination_type: null, severity: "Level 0" 으로 표시
 
 이제 제공된 이미지를 분석하고 지정된 JSON 형식으로 평가를 반환하세요. **반드시 가이드라인에 정의된 검수 부위, 오염 항목, 유효한 레벨만 사용하세요.** JSON만 출력하고 다른 텍스트는 출력하지 마세요."""  # noqa: E501
 
